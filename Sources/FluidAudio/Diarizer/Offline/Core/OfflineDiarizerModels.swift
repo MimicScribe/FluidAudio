@@ -141,6 +141,20 @@ public struct OfflineDiarizerModels: Sendable {
             compilationDuration: compilationDuration
         )
     }
+
+    /// Load a fresh, independent fbank MLModel instance from the same compiled model on disk.
+    /// Use when running concurrent pipelines that each need their own fbank model for thread safety
+    /// (sync batch prediction is not thread-safe on a shared MLModel instance).
+    public static func loadDedicatedFbankModel(
+        from directory: URL? = nil
+    ) throws -> MLModel {
+        let modelsDirectory = directory ?? defaultModelsDirectory()
+        let repoPath = modelsDirectory.appendingPathComponent(Repo.diarizer.folderName)
+        let fbankPath = repoPath.appendingPathComponent(ModelNames.OfflineDiarizer.fbankPath)
+        let config = MLModelConfiguration()
+        config.computeUnits = .cpuOnly
+        return try MLModel(contentsOf: fbankPath, configuration: config)
+    }
 }
 
 extension MLComputeUnits {

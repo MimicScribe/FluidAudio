@@ -4,13 +4,19 @@ import Foundation
 import OSLog
 
 @available(macOS 14.0, iOS 17.0, *)
-public final class OfflineDiarizerManager {
+public final class OfflineDiarizerManager: @unchecked Sendable {
     private let logger = AppLogger(category: "OfflineDiarizer")
     private let config: OfflineDiarizerConfig
 
     // CoreML models are not Sendable but are used read-only after initialization.
     // We manage the safety ourselves by only writing during initialization.
     nonisolated(unsafe) private var models: OfflineDiarizerModels?
+
+    /// Dedicated fbank model instance for this manager. When set, used instead of the shared
+    /// fbankModel from OfflineDiarizerModels. This allows concurrent pipelines to each use
+    /// their own fbank model with the sync batch prediction API (which is not thread-safe
+    /// on a shared MLModel instance).
+    nonisolated(unsafe) private var dedicatedFbankModel: MLModel?
 
     public init(config: OfflineDiarizerConfig = .default) {
         self.config = config
@@ -19,6 +25,12 @@ public final class OfflineDiarizerManager {
     public func initialize(models: OfflineDiarizerModels) {
         self.models = models
         logger.info("Offline diarizer models initialized")
+    }
+
+    /// Set a dedicated fbank model for this manager instance.
+    /// Call after `initialize(models:)` to override the shared fbank model.
+    public func setDedicatedFbankModel(_ model: MLModel) {
+        self.dedicatedFbankModel = model
     }
 
     /// Ensure offline diarizer models are available, downloading and compiling them when needed.
@@ -126,7 +138,12 @@ public final class OfflineDiarizerManager {
             throw OfflineDiarizationError.modelNotLoaded("offline-diarizer")
         }
 
+        // Short instance ID for log interleaving when two pipelines run concurrently
+        let pipelineId = String(ObjectIdentifier(self).hashValue & 0xFFFF, radix: 16)
         let totalStart = Date()
+        logger.info(
+            "[pipeline:\(pipelineId)] process() START — audioLoading=\(String(format: "%.3f", audioLoadingSeconds))s stepRatio=\(config.segmentationStepRatio)"
+        )
 
         let streamPair = AsyncThrowingStream<SegmentationChunk, Error>.makeStream()
         let chunkStream = streamPair.stream
@@ -135,11 +152,16 @@ public final class OfflineDiarizerManager {
         // Capture models for concurrent tasks
         let capturedModels = models
         let capturedConfig = config
+        let capturedPipelineId = pipelineId
+        // Use dedicated fbank model if set (for concurrent pipeline thread safety),
+        // otherwise fall back to the shared model from OfflineDiarizerModels.
+        let fbankModelForPipeline = dedicatedFbankModel ?? models.fbankModel
 
         let segmentationTask = Task(priority: .userInitiated) {
             [capturedModels, capturedConfig] () throws -> (SegmentationOutput, TimeInterval) in
             let processor = OfflineSegmentationProcessor()
             let start = Date()
+            self.logger.info("[pipeline:\(capturedPipelineId)] segmentation START")
             do {
                 let segmentation = try await processor.process(
                     audioSource: audioSource,
@@ -157,7 +179,11 @@ public final class OfflineDiarizerManager {
                     }
                 )
                 chunkContinuation.finish()
-                return (segmentation, Date().timeIntervalSince(start))
+                let elapsed = Date().timeIntervalSince(start)
+                self.logger.info(
+                    "[pipeline:\(capturedPipelineId)] segmentation DONE: \(String(format: "%.3f", elapsed))s, \(segmentation.numChunks) chunks"
+                )
+                return (segmentation, elapsed)
             } catch {
                 chunkContinuation.finish(throwing: error)
                 throw error
@@ -165,19 +191,25 @@ public final class OfflineDiarizerManager {
         }
 
         let embeddingTask = Task(priority: .userInitiated) {
-            [capturedModels, capturedConfig] () throws -> ([TimedEmbedding], TimeInterval) in
+            [capturedModels, capturedConfig, fbankModelForPipeline] () throws
+                -> ([TimedEmbedding], TimeInterval) in
             let extractor = OfflineEmbeddingExtractor(
-                fbankModel: capturedModels.fbankModel,
+                fbankModel: fbankModelForPipeline,
                 embeddingModel: capturedModels.embeddingModel,
                 pldaTransform: PLDATransform(pldaRhoModel: capturedModels.pldaRhoModel, psi: capturedModels.pldaPsi),
                 config: capturedConfig
             )
             let start = Date()
+            self.logger.info("[pipeline:\(capturedPipelineId)] embedding extraction START")
             let embeddings = try await extractor.extractEmbeddings(
                 audioSource: audioSource,
                 segmentationStream: chunkStream
             )
-            return (embeddings, Date().timeIntervalSince(start))
+            let elapsed = Date().timeIntervalSince(start)
+            self.logger.info(
+                "[pipeline:\(capturedPipelineId)] embedding extraction DONE: \(String(format: "%.3f", elapsed))s, \(embeddings.count) vectors"
+            )
+            return (embeddings, elapsed)
         }
 
         let segmentationResult: (SegmentationOutput, TimeInterval)
@@ -209,6 +241,7 @@ public final class OfflineDiarizerManager {
         let embeddingFeatures = timedEmbeddings.map { $0.embedding256.map { Double($0) } }
         let rhoFeatures = timedEmbeddings.map { $0.rho128 }
 
+        logger.info("[pipeline:\(pipelineId)] clustering START — \(timedEmbeddings.count) embeddings")
         let clusteringStart = Date()
         let trainingIndices = selectTrainingEmbeddings(
             timedEmbeddings: timedEmbeddings
@@ -323,6 +356,10 @@ public final class OfflineDiarizerManager {
             embeddingExtractionSeconds: embeddingTime,
             speakerClusteringSeconds: clusteringTime,
             postProcessingSeconds: max(0, totalProcessing - segmentationTime - embeddingTime - clusteringTime)
+        )
+
+        logger.info(
+            "[pipeline:\(pipelineId)] process() DONE — \(segments.count) segments, \(centroids.count) speakers, total=\(String(format: "%.3f", totalProcessing))s (seg=\(String(format: "%.3f", segmentationTime))s emb=\(String(format: "%.3f", embeddingTime))s cluster=\(String(format: "%.3f", clusteringTime))s)"
         )
 
         return DiarizationResult(

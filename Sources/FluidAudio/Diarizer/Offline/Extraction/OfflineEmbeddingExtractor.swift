@@ -280,7 +280,7 @@ struct OfflineEmbeddingExtractor {
             skipThreshold = nil
         }
 
-        func performEmbeddingWarmup() throws {
+        func performEmbeddingWarmup() async throws {
             let warmupAudioArray = try memoryOptimizer.createAlignedArray(
                 shape: fbankInputShape,
                 dataType: .float32
@@ -291,7 +291,7 @@ struct OfflineEmbeddingExtractor {
             let warmupFbankFeatures = try runFbankModel(audioArray: warmupAudioArray)
             let zeroWeights = [Float](repeating: 0, count: weightFrameCount)
             let warmupWeightsArray = try prepareWeightsInput(weights: zeroWeights)
-            _ = try runEmbeddingModel(
+            _ = try await runEmbeddingModel(
                 fbankFeatures: warmupFbankFeatures,
                 weightsArray: warmupWeightsArray
             )
@@ -489,7 +489,7 @@ struct OfflineEmbeddingExtractor {
                 } else {
                     let embeddingStart = resampleEnd
                     let weightsArray = try prepareWeightsInput(weights: resampledMask)
-                    embedding256 = try runEmbeddingModel(
+                    embedding256 = try await runEmbeddingModel(
                         fbankFeatures: fbankFeatures,
                         weightsArray: weightsArray
                     )
@@ -567,7 +567,7 @@ struct OfflineEmbeddingExtractor {
         }
 
         do {
-            try performEmbeddingWarmup()
+            try await performEmbeddingWarmup()
         } catch {
             logger.debug("Embedding warmup skipped due to error: \(error.localizedDescription)")
         }
@@ -796,7 +796,7 @@ struct OfflineEmbeddingExtractor {
     private func runEmbeddingModel(
         fbankFeatures: MLMultiArray,
         weightsArray: MLMultiArray
-    ) throws -> [Float] {
+    ) async throws -> [Float] {
         let provider = ZeroCopyDiarizerFeatureProvider(
             features: [
                 fbankFeatureName: MLFeatureValue(multiArray: fbankFeatures),
@@ -809,7 +809,7 @@ struct OfflineEmbeddingExtractor {
             weightsArray.prefetchToNeuralEngine()
         }
 
-        let output = try embeddingModel.prediction(from: provider, options: options)
+        let output = try await embeddingModel.prediction(from: provider, options: options)
         guard let embeddingArray = output.featureValue(for: embeddingOutputName)?.multiArrayValue else {
             throw OfflineDiarizationError.processingFailed("Embedding model missing \(embeddingOutputName) output")
         }
