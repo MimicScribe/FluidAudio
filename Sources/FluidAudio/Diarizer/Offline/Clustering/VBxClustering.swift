@@ -23,7 +23,7 @@ import os.signpost
 /// The implementation includes warm-start initialization from initial hard cluster
 /// assignments and supports PLDA whitening transformation of input features.
 @available(macOS 14.0, iOS 17.0, *)
-struct VBxClustering {
+public struct VBxClustering {
     private let config: OfflineDiarizerConfig
     private let pldaTransform: PLDATransform
     private let logger = AppLogger(category: "OfflineVBx")
@@ -32,13 +32,13 @@ struct VBxClustering {
         category: .pointsOfInterest
     )
 
-    init(config: OfflineDiarizerConfig, pldaTransform: PLDATransform) {
+    public init(config: OfflineDiarizerConfig, pldaTransform: PLDATransform) {
         self.config = config
         self.pldaTransform = pldaTransform
     }
 
     // MARK: - VBx Clustering Algorithm
-    func refine(
+    public func refine(
         rhoFeatures: [[Double]],
         initialClusters: [Int]
     ) -> VBxOutput {
