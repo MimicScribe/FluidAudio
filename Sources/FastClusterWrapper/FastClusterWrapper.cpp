@@ -242,3 +242,50 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
         return FASTCLUSTER_WRAPPER_UNKNOWN_ERROR;
     }
 }
+
+fastcluster_wrapper_status fastcluster_compute_average_linkage_from_distances(
+    double *condensedDistances,
+    size_t pointCount,
+    double *dendrogramOut,
+    size_t dendrogramLength
+) {
+    if (condensedDistances == nullptr || dendrogramOut == nullptr) {
+        return FASTCLUSTER_WRAPPER_INVALID_ARGUMENT;
+    }
+    if (pointCount == 0) {
+        return FASTCLUSTER_WRAPPER_SUCCESS;
+    }
+    if (pointCount > static_cast<size_t>(MAX_INDEX)) {
+        return FASTCLUSTER_WRAPPER_INDEX_OVERFLOW;
+    }
+
+    const size_t requiredLength = (pointCount > 1) ? (pointCount - 1) * 4 : 0;
+    if (dendrogramLength < requiredLength) {
+        return FASTCLUSTER_WRAPPER_OUTPUT_TOO_SMALL;
+    }
+
+    if (pointCount == 1) {
+        return FASTCLUSTER_WRAPPER_SUCCESS;
+    }
+
+    try {
+        const t_index N = static_cast<t_index>(pointCount);
+        std::vector<t_index> members(static_cast<size_t>(N), 1);
+        cluster_result result(N - 1);
+        NN_chain_core<METHOD_METR_AVERAGE, t_index>(
+            N, condensedDistances, members.data(), result);
+        // NN_chain_core does NOT sort the dendrogram entries — pass
+        // sorted=false so generateSciPyDendrogram sorts them first
+        // (same behavior as scipy.cluster.hierarchy.linkage).
+        generateSciPyDendrogram<false>(dendrogramOut, result, N);
+        return FASTCLUSTER_WRAPPER_SUCCESS;
+    } catch (const std::bad_alloc &) {
+        return FASTCLUSTER_WRAPPER_ALLOCATION_FAILURE;
+    } catch (const nan_error &) {
+        return FASTCLUSTER_WRAPPER_RUNTIME_ERROR;
+    } catch (const std::exception &) {
+        return FASTCLUSTER_WRAPPER_RUNTIME_ERROR;
+    } catch (...) {
+        return FASTCLUSTER_WRAPPER_UNKNOWN_ERROR;
+    }
+}

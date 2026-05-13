@@ -67,6 +67,43 @@ public struct PLDATransform {
         return transformed.first ?? []
     }
 
+    /// Decision-relevant two-covariance PLDA log-likelihood-ratio score
+    /// between a query and a candidate, both in PLDA-projected rho space.
+    ///
+    /// Returns the terms of the LLR that vary with the *candidate* given
+    /// a fixed query: the bilinear "psi-weighted dot product" minus the
+    /// candidate's PLDA-weighted self-energy. The query's own self-energy
+    /// and the log-determinant constant drop out of argmax-over-candidates
+    /// comparisons, so this score gives the correct ranking when picking
+    /// the most-likely cluster for a query.
+    ///
+    /// Score formula (in the eigendecomposed basis where Σ_w = I and
+    /// Σ_b = diag(psi)):
+    ///
+    ///   score(q, c) = Σ_k [ psi_k / (1 + 2·psi_k) ] · q_k · c_k
+    ///              − Σ_k [ psi_k² / (2·(1+psi_k)·(1+2·psi_k)) ] · c_k²
+    ///
+    /// Reference: Brummer & van Leeuwen (2010), "The speaker partitioning
+    /// problem" — standard two-covariance PLDA scoring formulation.
+    /// Distinct from `score(_:_:)` which is plain cosine on rho.
+    public func llrScore(_ query: [Double], _ candidate: [Double]) -> Double {
+        guard query.count == rhoDimension, candidate.count == rhoDimension,
+            psi.count == rhoDimension
+        else { return 0 }
+        var bilinear: Double = 0
+        var candidateSelfEnergy: Double = 0
+        for k in 0..<rhoDimension {
+            let p = psi[k]
+            let onePlusPsi = 1.0 + p
+            let onePlusTwoPsi = 1.0 + 2.0 * p
+            let a = p / onePlusTwoPsi
+            let b = (p * p) / (2.0 * onePlusPsi * onePlusTwoPsi)
+            bilinear += a * query[k] * candidate[k]
+            candidateSelfEnergy += b * candidate[k] * candidate[k]
+        }
+        return bilinear - candidateSelfEnergy
+    }
+
     /// Cosine similarity score between two rho vectors.
     public func score(_ lhs: [Double], _ rhs: [Double]) -> Double {
         guard lhs.count == rhoDimension, rhs.count == rhoDimension else {

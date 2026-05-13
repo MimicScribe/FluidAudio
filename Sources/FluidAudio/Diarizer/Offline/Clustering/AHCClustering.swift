@@ -116,6 +116,67 @@ public struct AHCClustering {
         return sqrt(max(0, 2.0 - 2.0 * clamped))
     }
 
+    /// Cluster from a precomputed condensed distance matrix using
+    /// average linkage (NN-chain algorithm). Distances must be
+    /// non-negative; smaller = more similar. Distance threshold is
+    /// applied directly (no similarity-to-distance conversion — the
+    /// caller is responsible for choosing a threshold in the same
+    /// units as `condensedDistances`).
+    ///
+    /// - Parameters:
+    ///   - condensedDistances: Upper-triangular packed pairwise
+    ///     distances, row-major. Length must be `n * (n-1) / 2`
+    ///     where `n` is the number of points. The buffer IS MUTATED
+    ///     by NN-chain — callers should treat it as consumed.
+    ///   - pointCount: Number of original points.
+    ///   - distanceThreshold: Merge node iff its merge distance is
+    ///     ≤ this threshold.
+    public func clusterFromCondensedDistances(
+        condensedDistances: inout [Double],
+        pointCount: Int,
+        distanceThreshold: Double
+    ) -> [Int] {
+        guard pointCount > 0 else { return [] }
+        if pointCount == 1 { return [0] }
+
+        let ahcState = signposter.beginInterval("AHC from precomputed distances")
+        let expectedLength = pointCount * (pointCount - 1) / 2
+        guard condensedDistances.count == expectedLength else {
+            logger.error(
+                "condensedDistances has \(condensedDistances.count) entries; expected \(expectedLength)"
+            )
+            return Array(0..<pointCount)
+        }
+
+        let dendrogramLength = (pointCount - 1) * 4
+        var dendrogram = [Double](repeating: 0, count: dendrogramLength)
+
+        let status = condensedDistances.withUnsafeMutableBufferPointer { distPtr in
+            dendrogram.withUnsafeMutableBufferPointer { dendPtr in
+                fastcluster_compute_average_linkage_from_distances(
+                    distPtr.baseAddress,
+                    pointCount,
+                    dendPtr.baseAddress,
+                    dendrogramLength
+                )
+            }
+        }
+
+        guard status == FASTCLUSTER_WRAPPER_SUCCESS else {
+            logger.error("fastcluster (average linkage) failed with status \(status.rawValue)")
+            return Array(0..<pointCount)
+        }
+
+        let assignments = assignmentsFromDendrogram(
+            dendrogram,
+            count: pointCount,
+            distanceThreshold: distanceThreshold
+        )
+        let result = remapClusterIds(assignments)
+        signposter.endInterval("AHC from precomputed distances", ahcState)
+        return result
+    }
+
     // MARK: - Dendrogram Parsing & Threshold-Based Cluster Assignment
     private func assignmentsFromDendrogram(
         _ dendrogram: [Double],
