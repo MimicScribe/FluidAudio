@@ -21,10 +21,30 @@ struct OfflineReconstruction {
         hardClusters: [[Int]],
         centroids: [[Double]]
     ) -> [TimedSpeakerSegment] {
-        guard segmentation.numChunks > 0, segmentation.numFrames > 0 else { return [] }
+        buildSegmentsCapturingFrameGrid(
+            segmentation: segmentation,
+            hardClusters: hardClusters,
+            centroids: centroids,
+            captureFrameGrid: false
+        ).segments
+    }
+
+    /// Same algorithm as `buildSegments`, but optionally returns the
+    /// global activation grid alongside the segment list. Used by
+    /// `OfflineDiarizerManager.processCapturingFrameGrid` to expose
+    /// per-frame data to downstream custom decoders.
+    func buildSegmentsCapturingFrameGrid(
+        segmentation: SegmentationOutput,
+        hardClusters: [[Int]],
+        centroids: [[Double]],
+        captureFrameGrid: Bool
+    ) -> (segments: [TimedSpeakerSegment], frameGrid: DiarizationFrameGrid?) {
+        guard segmentation.numChunks > 0, segmentation.numFrames > 0 else {
+            return ([], nil)
+        }
 
         let frameDuration = segmentation.frameDuration
-        guard frameDuration > 0 else { return [] }
+        guard frameDuration > 0 else { return ([], nil) }
 
         let clusterCount = max(centroids.count, 1)
         let gapThreshold = max(config.minGapDuration, config.segmentationMinDurationOff)
@@ -167,6 +187,18 @@ struct OfflineReconstruction {
             perFrameClusters[frame] = selected
         }
 
+        Self.dumpFrameLogitsIfEnabled(
+            segmentation: segmentation,
+            frameDuration: frameDuration,
+            totalFrames: totalFrames,
+            clusterCount: clusterCount,
+            activationAverages: activationAverages,
+            perFrameClusters: perFrameClusters,
+            speakerCountPerFrame: speakerCountPerFrame,
+            hardClusters: hardClusters,
+            centroids: centroids
+        )
+
         var activeSegments: [Int: Accumulator] = [:]
         var rawSegments: [TimedSpeakerSegment] = []
 
@@ -216,7 +248,30 @@ struct OfflineReconstruction {
         }
 
         let merged = mergeSegments(rawSegments, gapThreshold: gapThreshold)
-        return sanitize(segments: merged)
+        let sanitizedSegments = sanitize(segments: merged)
+
+        let frameGrid: DiarizationFrameGrid?
+        if captureFrameGrid {
+            // Convert Double -> Float to keep memory in check.
+            let activationsFloat: [[Float]] = activationAverages.map { row in
+                row.map { Float($0) }
+            }
+            let chunkOffsets = (0..<segmentation.numChunks).map { idx -> Double in
+                segmentation.chunkOffsets.indices.contains(idx)
+                    ? segmentation.chunkOffsets[idx] : 0.0
+            }
+            frameGrid = DiarizationFrameGrid(
+                frameDuration: frameDuration,
+                totalFrames: totalFrames,
+                clusterCount: clusterCount,
+                activationAverages: activationsFloat,
+                chunkOffsets: chunkOffsets,
+                hardClusters: hardClusters
+            )
+        } else {
+            frameGrid = nil
+        }
+        return (sanitizedSegments, frameGrid)
     }
 
     func buildSpeakerDatabase(
@@ -425,6 +480,78 @@ struct OfflineReconstruction {
             return segmentation.chunkOffsets[chunkIndex]
         } else {
             return Double(chunkIndex) * config.windowDuration
+        }
+    }
+
+    // MARK: - Phase 0 diagnostic frame-logit dump
+    //
+    // When `MIMICSCRIBE_FLUID_DUMP_FRAME_LOGITS=<dir>` is set, write a JSON
+    // snapshot of the global frame grid + per-chunk cluster assignments +
+    // cluster centroids for each call to `buildSegments`. The mimicscribe
+    // caller sets `MIMICSCRIBE_FLUID_DUMP_TAG=<file_id>` before each
+    // diarization call to control the output filename; if missing, falls
+    // back to a monotonic counter.
+    //
+    // Off by default; zero overhead when env-var unset. Used by
+    // `scripts/analyze_three_signals.py` in the parakeet-transcriber repo.
+
+    fileprivate static func dumpFrameLogitsIfEnabled(
+        segmentation: SegmentationOutput,
+        frameDuration: Double,
+        totalFrames: Int,
+        clusterCount: Int,
+        activationAverages: [[Double]],
+        perFrameClusters: [[Int]],
+        speakerCountPerFrame: [Int],
+        hardClusters: [[Int]],
+        centroids: [[Double]]
+    ) {
+        let env = ProcessInfo.processInfo.environment
+        guard let dirPath = env["MIMICSCRIBE_FLUID_DUMP_FRAME_LOGITS"],
+            !dirPath.isEmpty
+        else { return }
+
+        let dir = URL(fileURLWithPath: dirPath)
+        let tag = env["MIMICSCRIBE_FLUID_DUMP_TAG"]
+
+        let basename: String
+        if let tag, !tag.isEmpty {
+            basename = tag
+        } else {
+            basename = "dump_\(UUID().uuidString.prefix(8))"
+        }
+
+        let chunkOffsets = (0..<segmentation.numChunks).map { i -> Double in
+            segmentation.chunkOffsets.indices.contains(i)
+                ? segmentation.chunkOffsets[i] : 0.0
+        }
+
+        let payload: [String: Any] = [
+            "frame_duration": frameDuration,
+            "total_frames": totalFrames,
+            "cluster_count": clusterCount,
+            "num_chunks": segmentation.numChunks,
+            "num_speakers_per_chunk": segmentation.numSpeakers,
+            "chunk_offsets": chunkOffsets,
+            "activation_averages": activationAverages,
+            "per_frame_clusters": perFrameClusters,
+            "speaker_count_per_frame": speakerCountPerFrame,
+            "hard_clusters": hardClusters,
+            "centroids": centroids,
+        ]
+
+        do {
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("\(basename).json")
+            let data = try JSONSerialization.data(
+                withJSONObject: payload, options: [.sortedKeys])
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Diagnostic is best-effort; never throw.
+            AppLogger(category: "OfflineReconstruction").warning(
+                "Frame-logit dump failed for \(basename): \(error.localizedDescription)"
+            )
         }
     }
 }
