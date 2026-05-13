@@ -145,6 +145,52 @@ public final class OfflineDiarizerManager {
         return try cluster(prepared)
     }
 
+    /// Same as `process(audio:)` but additionally returns the global
+    /// activation grid for downstream consumers running a custom decode
+    /// (e.g. mimicscribe's three-signal Viterbi). The standard
+    /// `DiarizationResult.segments` is computed normally; the frame grid
+    /// is the per-frame data the default RLE decoder consumed before
+    /// producing those segments.
+    public func processCapturingFrameGrid(
+        audio: [Float]
+    ) async throws -> (result: DiarizationResult, frameGrid: DiarizationFrameGrid) {
+        try await processCapturingFrameGrid(
+            audioSource: ArrayAudioSampleSource(samples: audio),
+            audioLoadingSeconds: 0
+        )
+    }
+
+    /// File-URL flavor of `processCapturingFrameGrid(audio:)`.
+    public func processCapturingFrameGrid(
+        _ url: URL
+    ) async throws -> (result: DiarizationResult, frameGrid: DiarizationFrameGrid) {
+        let factory = AudioSourceFactory()
+        let (source, loadDuration) = try factory.makeDiskBackedSource(
+            from: url,
+            targetSampleRate: config.segmentation.sampleRate
+        )
+        defer { source.cleanup() }
+        return try await processCapturingFrameGrid(
+            audioSource: source,
+            audioLoadingSeconds: loadDuration
+        )
+    }
+
+    /// `audioSource` flavor of `processCapturingFrameGrid(audio:)`. Layered on top of the
+    /// `prepare()`/`cluster()` split (upstream PR #789): runs the shared segmentation +
+    /// embedding phase once, then clusters via `clusterCapturingFrameGrid(_:)` instead of
+    /// discarding the frame grid the default decoder consumed.
+    public func processCapturingFrameGrid(
+        audioSource: AudioSampleSource,
+        audioLoadingSeconds: TimeInterval
+    ) async throws -> (result: DiarizationResult, frameGrid: DiarizationFrameGrid) {
+        let prepared = try await prepare(
+            audioSource: audioSource,
+            audioLoadingSeconds: audioLoadingSeconds
+        )
+        return try clusterCapturingFrameGrid(prepared)
+    }
+
     /// Runs deterministic segmentation and embedding extraction over `audio`.
     ///
     /// - Parameters:
@@ -268,6 +314,29 @@ public final class OfflineDiarizerManager {
     /// The receiving instance supplies its models and configuration, and must already be
     /// initialized. Reusing a prepared value is supported.
     public func cluster(_ prepared: PreparedDiarization) throws -> DiarizationResult {
+        try clusterInternal(prepared, captureFrameGrid: false).result
+    }
+
+    /// Frame-grid-capturing counterpart to `cluster(_:)`. Same clustering + reconstruction
+    /// as `cluster(_:)`, but additionally returns the global per-frame per-speaker
+    /// activation grid the default RLE decoder consumed before producing `segments` —
+    /// for downstream consumers running a custom decode (e.g. mimicscribe's three-signal
+    /// Viterbi) on the same `PreparedDiarization` used for the standard path.
+    public func clusterCapturingFrameGrid(
+        _ prepared: PreparedDiarization
+    ) throws -> (result: DiarizationResult, frameGrid: DiarizationFrameGrid) {
+        let combined = try clusterInternal(prepared, captureFrameGrid: true)
+        guard let grid = combined.frameGrid else {
+            throw OfflineDiarizationError.modelNotLoaded(
+                "frame grid capture failed (empty segmentation output)")
+        }
+        return (combined.result, grid)
+    }
+
+    private func clusterInternal(
+        _ prepared: PreparedDiarization,
+        captureFrameGrid: Bool
+    ) throws -> (result: DiarizationResult, frameGrid: DiarizationFrameGrid?) {
         guard let models else {
             throw OfflineDiarizationError.modelNotLoaded("offline-diarizer")
         }
@@ -416,12 +485,15 @@ public final class OfflineDiarizerManager {
         }
 
         let reconstruction = OfflineReconstruction(config: config)
-        let segments = reconstruction.buildSegments(
+        let buildResult = reconstruction.buildSegmentsCapturingFrameGrid(
             segmentation: segmentation,
             hardClusters: chunkAssignments,
             centroids: centroids,
-            spanEmbedder: spanEmbedder
+            spanEmbedder: spanEmbedder,
+            captureFrameGrid: captureFrameGrid
         )
+        let segments = buildResult.segments
+        let frameGrid = buildResult.frameGrid
 
         let speakerDatabase = reconstruction.buildSpeakerDatabase(segments: segments)
 
@@ -458,11 +530,141 @@ public final class OfflineDiarizerManager {
             )
         )
 
-        return DiarizationResult(
+        let result = DiarizationResult(
             segments: segments,
             speakerDatabase: speakerDatabase,
             chunkEmbeddings: publicChunkEmbeddings,
             timings: timings
+        )
+        return (result, frameGrid)
+    }
+
+    /// Pre-clustering output: chunk WeSpeaker embeddings only, with no
+    /// VBx clustering and no reconstruction. For consumers (mimicscribe's
+    /// Path A) that want to inject additional embeddings (ASR-bounded
+    /// sentence samples) into the clustering stage rather than receiving
+    /// FluidAudio's chunk-only VBx output and re-clustering after the fact.
+    ///
+    /// The returned `chunkEmbeddings` carry an empty `speakerId` since no
+    /// clustering has been done; the caller is responsible for clustering
+    /// (chunks ∪ their own samples) and assigning speaker IDs.
+    public struct PreClusteringResult: Sendable {
+        public let chunkEmbeddings: [ChunkEmbedding]
+        /// Raw segmentation output: per-chunk per-frame per-speaker_slot
+        /// activations, chunk offsets, frame duration. Consumers can build
+        /// their own activation_averages grid using their own chunk→cluster
+        /// mapping (see OfflineReconstruction's algorithm). Per-chunk
+        /// `TimedEmbedding.frameWeights` is sufficient for masked
+        /// re-embedding but not for global frame-grid construction; that
+        /// requires the per-chunk speakerWeights matrix exposed here.
+        public let segmentation: SegmentationOutput
+        /// Per-chunk per-speaker_slot frame range needed to map a global
+        /// frame index back to a chunk's local slot. Indexed identically
+        /// to `chunkEmbeddings` (one entry per slot, not per chunk).
+        public let timedEmbeddingMetadata: [TimedEmbeddingMetadata]
+        public let audioLoadingSeconds: TimeInterval
+        public let segmentationSeconds: TimeInterval
+        public let embeddingSeconds: TimeInterval
+    }
+
+    /// Public mirror of internal `TimedEmbedding`'s frame-range fields,
+    /// without the embedding payload (the caller already has those via
+    /// `chunkEmbeddings`). Lets a consumer reconstruct the chunk-local
+    /// frame range covered by each slot when building the global frame
+    /// grid.
+    public struct TimedEmbeddingMetadata: Sendable {
+        public let chunkIndex: Int
+        public let speakerIndex: Int
+        public let startFrame: Int
+        public let endFrame: Int
+        public let frameWeights: [Float]
+
+        public init(
+            chunkIndex: Int,
+            speakerIndex: Int,
+            startFrame: Int,
+            endFrame: Int,
+            frameWeights: [Float]
+        ) {
+            self.chunkIndex = chunkIndex
+            self.speakerIndex = speakerIndex
+            self.startFrame = startFrame
+            self.endFrame = endFrame
+            self.frameWeights = frameWeights
+        }
+    }
+
+    public func extractChunkEmbeddings(audio: [Float]) async throws -> PreClusteringResult {
+        try await extractChunkEmbeddings(
+            audioSource: ArrayAudioSampleSource(samples: audio),
+            audioLoadingSeconds: 0
+        )
+    }
+
+    public func extractChunkEmbeddings(_ url: URL) async throws -> PreClusteringResult {
+        let factory = AudioSourceFactory()
+        let (source, loadDuration) = try factory.makeDiskBackedSource(
+            from: url,
+            targetSampleRate: config.segmentation.sampleRate
+        )
+        defer { source.cleanup() }
+        return try await extractChunkEmbeddings(
+            audioSource: source,
+            audioLoadingSeconds: loadDuration
+        )
+    }
+
+    /// Layered on top of `prepare(audioSource:audioLoadingSeconds:)` (upstream PR #789):
+    /// runs the same shared segmentation + embedding phase `process()`/`cluster()` use,
+    /// then stops before clustering and maps the internal `TimedEmbedding` list to the
+    /// public `PreClusteringResult` shape. `PreparedDiarization`'s stored properties are
+    /// module-internal (by design — see its doc comment), so this mapping can only happen
+    /// from inside the FluidAudio module, which is exactly where this method lives.
+    public func extractChunkEmbeddings(
+        audioSource: AudioSampleSource,
+        audioLoadingSeconds: TimeInterval
+    ) async throws -> PreClusteringResult {
+        let prepared = try await prepare(
+            audioSource: audioSource,
+            audioLoadingSeconds: audioLoadingSeconds
+        )
+        let timedEmbeddings = prepared.timedEmbeddings
+
+        guard !timedEmbeddings.isEmpty else {
+            throw OfflineDiarizationError.noSpeechDetected
+        }
+
+        // Map TimedEmbedding -> public ChunkEmbedding with empty speakerId.
+        // Caller will run their own clustering and assign IDs.
+        let chunkEmbeddings: [ChunkEmbedding] = timedEmbeddings.map { te in
+            ChunkEmbedding(
+                speakerId: "",
+                chunkIndex: te.chunkIndex,
+                speakerIndex: te.speakerIndex,
+                startTimeSeconds: te.startTime,
+                endTimeSeconds: te.endTime,
+                embedding256: te.embedding256,
+                rho128: te.rho128
+            )
+        }
+
+        let timedEmbeddingMetadata: [TimedEmbeddingMetadata] = timedEmbeddings.map { te in
+            TimedEmbeddingMetadata(
+                chunkIndex: te.chunkIndex,
+                speakerIndex: te.speakerIndex,
+                startFrame: te.startFrame,
+                endFrame: te.endFrame,
+                frameWeights: te.frameWeights
+            )
+        }
+
+        return PreClusteringResult(
+            chunkEmbeddings: chunkEmbeddings,
+            segmentation: prepared.segmentation,
+            timedEmbeddingMetadata: timedEmbeddingMetadata,
+            audioLoadingSeconds: prepared.audioLoadingSeconds,
+            segmentationSeconds: prepared.segmentationSeconds,
+            embeddingSeconds: prepared.embeddingExtractionSeconds
         )
     }
 

@@ -9,15 +9,17 @@ import FastClusterWrapper
 import FluidAudio_FastClusterWrapper
 #endif
 
-struct AHCClustering {
+public struct AHCClustering {
     private let logger = AppLogger(category: "OfflineAHC")
     private let signposter = OSSignposter(
         subsystem: "com.fluidaudio.diarization",
         category: .pointsOfInterest
     )
 
+    public init() {}
+
     // MARK: - Agglomerative Hierarchical Clustering
-    func cluster(
+    public func cluster(
         embeddingFeatures: [[Double]],
         threshold: Double
     ) -> [Int] {

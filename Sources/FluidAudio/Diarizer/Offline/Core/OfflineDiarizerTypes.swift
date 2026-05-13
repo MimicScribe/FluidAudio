@@ -752,3 +752,53 @@ extension OfflineDiarizerConfig {
         return copy
     }
 }
+
+/// Frame-level diarization decode inputs, exposed for downstream consumers
+/// that want to run a custom decode (e.g. a multi-signal HMM Viterbi) over
+/// the per-frame speaker activations rather than relying on FluidAudio's
+/// default per-frame argmax + RLE.
+///
+/// All arrays are aligned to the global frame grid where
+/// `t = frameIndex * frameDuration`. `activationAverages[t]` is a vector
+/// of length `clusterCount`, with each component in roughly [0, 1] (the
+/// chunk-overlap-averaged marginalized softmax activation for that
+/// global cluster at that frame).
+public struct DiarizationFrameGrid: Sendable {
+    /// Seconds per frame. Roughly 34 ms for the pyannote community-1
+    /// segmentation model.
+    public let frameDuration: Double
+
+    /// Number of frames in the global timeline.
+    public let totalFrames: Int
+
+    /// Number of global clusters that VBx produced for this file.
+    public let clusterCount: Int
+
+    /// `[totalFrames] × [clusterCount]` per-cluster activation averages
+    /// after chunk-overlap merging. Stored as `Float` to keep memory
+    /// reasonable (~T × C × 4 bytes).
+    public let activationAverages: [[Float]]
+
+    /// Per-chunk start time in seconds.
+    public let chunkOffsets: [Double]
+
+    /// `[numChunks] × [numSpeakersPerChunk]` cluster ids assigned by VBx
+    /// to each chunk's local speaker slot. `-1` / `-2` indicate unassigned.
+    public let hardClusters: [[Int]]
+
+    public init(
+        frameDuration: Double,
+        totalFrames: Int,
+        clusterCount: Int,
+        activationAverages: [[Float]],
+        chunkOffsets: [Double],
+        hardClusters: [[Int]]
+    ) {
+        self.frameDuration = frameDuration
+        self.totalFrames = totalFrames
+        self.clusterCount = clusterCount
+        self.activationAverages = activationAverages
+        self.chunkOffsets = chunkOffsets
+        self.hardClusters = hardClusters
+    }
+}
