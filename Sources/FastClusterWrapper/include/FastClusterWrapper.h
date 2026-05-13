@@ -39,6 +39,32 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
     size_t dendrogramLength
 );
 
+/// Compute average-linkage dendrogram from a precomputed condensed
+/// distance matrix. Suitable for custom metrics (e.g., PLDA-LLR
+/// distance) where the data is not in a Euclidean vector space.
+///
+/// - Parameters:
+///   - condensedDistances: Pointer to `pointCount * (pointCount - 1) / 2`
+///     doubles, upper-triangular packed in row-major order:
+///     D[i,j] (i < j) is at index `i*(2*N - i - 1)/2 + (j - i - 1)`.
+///     Must be symmetric pairwise distances (non-negative; smaller =
+///     more similar). The buffer IS MUTATED by NN_chain — caller
+///     should treat it as consumed.
+///   - pointCount: Number of original points (>= 1).
+///   - dendrogramOut: Output buffer receiving `(pointCount - 1) * 4`
+///     doubles in SciPy linkage format (left, right, distance, count).
+///   - dendrogramLength: Length of `dendrogramOut` in elements.
+///
+/// - Returns:
+///   - `FASTCLUSTER_WRAPPER_SUCCESS` on success.
+///   - One of the error codes above otherwise.
+fastcluster_wrapper_status fastcluster_compute_average_linkage_from_distances(
+    double *condensedDistances,
+    size_t pointCount,
+    double *dendrogramOut,
+    size_t dendrogramLength
+);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
