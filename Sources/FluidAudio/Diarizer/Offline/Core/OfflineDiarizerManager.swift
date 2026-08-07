@@ -565,6 +565,22 @@ public final class OfflineDiarizerManager {
         public let audioLoadingSeconds: TimeInterval
         public let segmentationSeconds: TimeInterval
         public let embeddingSeconds: TimeInterval
+
+        public init(
+            chunkEmbeddings: [ChunkEmbedding],
+            segmentation: SegmentationOutput,
+            timedEmbeddingMetadata: [TimedEmbeddingMetadata],
+            audioLoadingSeconds: TimeInterval,
+            segmentationSeconds: TimeInterval,
+            embeddingSeconds: TimeInterval
+        ) {
+            self.chunkEmbeddings = chunkEmbeddings
+            self.segmentation = segmentation
+            self.timedEmbeddingMetadata = timedEmbeddingMetadata
+            self.audioLoadingSeconds = audioLoadingSeconds
+            self.segmentationSeconds = segmentationSeconds
+            self.embeddingSeconds = embeddingSeconds
+        }
     }
 
     /// Public mirror of internal `TimedEmbedding`'s frame-range fields,
