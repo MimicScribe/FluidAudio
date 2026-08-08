@@ -710,13 +710,25 @@ public struct VBxClustering {
             "Speaker count \(detectedCount) outside bounds [\(constraints.minSpeakers), \(constraints.maxSpeakers)]; re-clustering to \(targetCount)"
         )
 
-        // n_init=10 の決定的初期化から最小 inertia を採用(sklearn 流)。単一ランダム初期化は
-        // 脆い話者を非決定的に collapse させる(ICT 小牧で実証、~10%↔~30% の揺れ)。
+        // 2026-08-07 MimicScribe gate evidence — nInit=10 best-of-inertia absorbed sparse
+        // minority speakers (merge_regressions 9/0 hard limit, 6 real speakers lost on the
+        // 57-file corpus); single-restart restored deliberately; revisit only with a
+        // small-cluster-preserving tie-break, not raw inertia.
+        //
+        // nInit: 1 makes clusterWithCentroidsNInit short-circuit to a single deterministic
+        // clusterWithCentroids(seed: baseSeed) call — i.e. one restart, no lowest-inertia
+        // selection across restarts. This is NOT byte-identical to the pre-#735 call (which
+        // passed no seed at all and fell through to a UInt64.random seed inside
+        // clusterWithCentroids, making that single restart non-deterministic run-to-run);
+        // this fork keeps the #735 determinism fix (nil seed defaults to 0) since a random
+        // seed would make our own ship-gate corpus runs irreproducible. The only piece of
+        // #735 being reverted here is the best-of-10-by-inertia multi-restart selection,
+        // which is the mechanism that reproducibly merges away sparse speakers.
         let (kmeansClusters, centroids) = KMeansClustering.clusterWithCentroidsNInit(
             embeddings: trainingEmbeddings,
             numClusters: targetCount,
             maxIterations: 100,
-            nInit: 10,
+            nInit: 1,
             baseSeed: 0
         )
 
