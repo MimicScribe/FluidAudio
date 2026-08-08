@@ -516,12 +516,18 @@ struct OfflineEmbeddingExtractor {
                 }
 
                 let cleanSum = VDSPOperations.sum(cleanMask)
-                let minActiveRatio: Float = 0.2
-                if cleanSum < Float(frameCount) * minActiveRatio {
-                    maskPreparationDuration += maskStart.duration(to: clock.now)
-                    emptyMaskCount += 1
-                    continue
-                }
+                // 2026-08-07 MimicScribe fork divergence — #523's minActiveRatio filter +
+                // binary-argmax masks delete ALL embeddings for sparse speakers (hard
+                // ship-gate: 9 merge regressions, sparsest speaker lost in 6/57 files; both
+                // changes needed reverting, ratio alone insufficient); transpose fix from the
+                // same PR deliberately KEPT; revisit only with a sparse-speaker-preserving
+                // alternative (e.g. per-speaker best-N-windows floor instead of a flat ratio).
+                // let minActiveRatio: Float = 0.2
+                // if cleanSum < Float(frameCount) * minActiveRatio {
+                //     maskPreparationDuration += maskStart.duration(to: clock.now)
+                //     emptyMaskCount += 1
+                //     continue
+                // }
                 let maskToUse: [Float]
                 let maskSum: Float
                 if cleanSum >= Float(minFramesForEmbedding) {
