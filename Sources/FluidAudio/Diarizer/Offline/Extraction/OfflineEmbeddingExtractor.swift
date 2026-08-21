@@ -481,13 +481,28 @@ struct OfflineEmbeddingExtractor {
                 dataType: .float32
             )
             let transposedPointer = transposedBuffer.dataPointer.assumingMemoryBound(to: Float.self)
+            // 2026-08-20 MimicScribe fork divergence — the THIRD #523 revert.
+            // Upstream's (speakerCount, frameCount) is the correct transpose of a
+            // frame-major [frameCount x speakerCount] buffer and yields true
+            // per-slot masks. The pre-#523 argument order below does NOT: for
+            // F=589, S=3 it makes slot k read three ~1.1 s time bands of the
+            // window with all slots' weights interleaved — a speaker-agnostic
+            // time-slice embedding. MimicScribe's SAS clusterer (chunk AHC +
+            // VBx on these vectors) was tuned on that accident, and measured
+            // against it the correct masks are LESS separable for our use:
+            // within-speaker cohesion drops on every corpus file (mass-matched
+            // sbrmv spk01 0.813 -> 0.664) and the ship gate loses 4-5 real
+            // speakers in every arm (AHC cut, slot floor, VBx grid, hybrid).
+            // Kept deliberately, as intentional time-band embedding, until a
+            // replacement extraction is measured. See mimicscribe
+            // docs/LOAD_BEARING.md (FluidAudio bump, 2026-08-20).
             vDSP_mtrans(
                 rowMajorPointer,
                 1,
                 transposedPointer,
                 1,
-                vDSP_Length(speakerCount),
-                vDSP_Length(frameCount)
+                vDSP_Length(frameCount),
+                vDSP_Length(speakerCount)
             )
 
             for speakerIndex in 0..<speakerCount {
