@@ -2,6 +2,7 @@
 #define FASTCLUSTER_WRAPPER_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,23 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
     const double *data,
     size_t pointCount,
     size_t dimension,
+    double *dendrogramOut,
+    size_t dendrogramLength
+);
+
+/// Centroid linkage over WEIGHTED points: point `i` stands for `weights[i]`
+/// identical observations (MimicScribe fork). Weights only seed each leaf's
+/// member count, which the centroid update `(ci*mi + cj*mj)/(mi+mj)` reads, so
+/// collapsing k exact duplicates into one point of weight k reproduces the
+/// unweighted clustering above the duplicates' zero-distance merges.
+/// `weights == NULL` means all ones (same as the unweighted entry point).
+///
+/// - Returns: `FASTCLUSTER_WRAPPER_INVALID_ARGUMENT` if any weight is < 1.
+fastcluster_wrapper_status fastcluster_compute_centroid_linkage_weighted(
+    const double *data,
+    size_t pointCount,
+    size_t dimension,
+    const int32_t *weights,
     double *dendrogramOut,
     size_t dendrogramLength
 );

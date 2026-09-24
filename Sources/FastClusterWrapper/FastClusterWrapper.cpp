@@ -51,14 +51,15 @@ struct CentroidDissimilarity {
     std::vector<t_float> centroidStorage;
     std::vector<t_index> members;
 
-    CentroidDissimilarity(const t_float *input, t_index sampleCount, t_index dim)
+    CentroidDissimilarity(const t_float *input, t_index sampleCount, t_index dim,
+                          const int32_t *weights = nullptr)
         : data(input),
           dimension(dim),
           count(sampleCount),
           centroidStorage(sampleCount > 1 ? static_cast<size_t>((sampleCount - 1) * dim) : 0u),
           members(sampleCount > 0 ? static_cast<size_t>(2 * sampleCount - 1) : 0u, 0) {
         for (t_index i = 0; i < count; ++i) {
-            members[static_cast<size_t>(i)] = 1;
+            members[static_cast<size_t>(i)] = weights ? static_cast<t_index>(weights[i]) : 1;
         }
     }
 
@@ -222,6 +223,18 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
     double *dendrogramOut,
     size_t dendrogramLength
 ) {
+    return fastcluster_compute_centroid_linkage_weighted(
+        data, pointCount, dimension, nullptr, dendrogramOut, dendrogramLength);
+}
+
+fastcluster_wrapper_status fastcluster_compute_centroid_linkage_weighted(
+    const double *data,
+    size_t pointCount,
+    size_t dimension,
+    const int32_t *weights,
+    double *dendrogramOut,
+    size_t dendrogramLength
+) {
     if (data == nullptr || dendrogramOut == nullptr) {
         return FASTCLUSTER_WRAPPER_INVALID_ARGUMENT;
     }
@@ -248,11 +261,38 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
         const t_index N = static_cast<t_index>(pointCount);
         const t_index dim = static_cast<t_index>(dimension);
 
-        CentroidDissimilarity dist(data, N, dim);
+        if (weights != nullptr) {
+            // Member counts sum into t_index; keep the total in range too.
+            int64_t total = 0;
+            for (size_t i = 0; i < pointCount; ++i) {
+                if (weights[i] < 1) {
+                    return FASTCLUSTER_WRAPPER_INVALID_ARGUMENT;
+                }
+                total += weights[i];
+            }
+            if (total > static_cast<int64_t>(MAX_INDEX)) {
+                return FASTCLUSTER_WRAPPER_INDEX_OVERFLOW;
+            }
+        }
+        CentroidDissimilarity dist(data, N, dim, weights);
         cluster_result result(N - 1);
         centroidLinkageParallel(N, dist, result);
         dist.postprocess(result);
         generateSciPyDendrogram<true>(dendrogramOut, result, N);
+        if (weights != nullptr) {
+            // generateSciPyDendrogram counts every leaf as one observation;
+            // column 3 must count a weighted leaf as `weights[leaf]`.
+            for (t_index row = 0; row < N - 1; ++row) {
+                double *entry = dendrogramOut + static_cast<size_t>(row) * 4;
+                double size = 0;
+                for (int child = 0; child < 2; ++child) {
+                    const t_index node = static_cast<t_index>(entry[child]);
+                    size += node < N ? static_cast<double>(weights[node])
+                                     : dendrogramOut[static_cast<size_t>(node - N) * 4 + 3];
+                }
+                entry[3] = size;
+            }
+        }
         return FASTCLUSTER_WRAPPER_SUCCESS;
     } catch (const std::bad_alloc &) {
         return FASTCLUSTER_WRAPPER_ALLOCATION_FAILURE;

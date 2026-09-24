@@ -19,9 +19,24 @@ public struct AHCClustering {
     public init() {}
 
     // MARK: - Agglomerative Hierarchical Clustering
+    /// Centroid-linkage AHC over `embeddingFeatures`, cut at `threshold`
+    /// (Euclidean distance on unit vectors).
+    ///
+    /// `collapseExactDuplicates` (MimicScribe fork, default on): rows that are
+    /// bit-for-bit identical are clustered once, as a single point weighted by
+    /// its copy count. Identical rows sit at distance 0 and merge before
+    /// anything else, and centroid linkage only reads a node's member count, so
+    /// the partition matches clustering every copy up to float ties: a merge
+    /// can only change where two distances agree to ~1e-16 (none did on a
+    /// 57-recording corpus at eight cuts). Speaker-chunk embeddings carry many
+    /// such copies (the extractor's mask-similarity skip reuses an embedding
+    /// across up to 32 windows), and AHC is O(n²), so this is where most of its
+    /// time goes. Rows that merely look equal (-0.0 vs 0.0, NaN payloads, a
+    /// scaled copy) are left as separate points.
     public func cluster(
         embeddingFeatures: [[Double]],
-        threshold: Double
+        threshold: Double,
+        collapseExactDuplicates: Bool = true
     ) -> [Int] {
         let count = embeddingFeatures.count
         guard count > 0 else { return [] }
@@ -33,21 +48,38 @@ public struct AHCClustering {
         }
 
         let ahcState = signposter.beginInterval("Agglomerative Hierarchical Clustering")
+        defer { signposter.endInterval("Agglomerative Hierarchical Clustering", ahcState) }
 
-        let normalized = normalizeFeatures(embeddingFeatures, dimension: dimension)
-        let dendrogramLength = (count - 1) * 4
+        // Every row maps to a point; without collapsing, point i is row i.
+        let groups =
+            collapseExactDuplicates
+            ? Self.exactDuplicateGroups(embeddingFeatures)
+            : DuplicateGroups(
+                rowToPoint: Array(0..<count), pointRows: Array(0..<count),
+                weights: [Int32](repeating: 1, count: count))
+        let pointCount = groups.pointRows.count
+        if pointCount == 1 {
+            return Array(repeating: 0, count: count)
+        }
+
+        let normalized = normalizeFeatures(
+            groups.pointRows.map { embeddingFeatures[$0] }, dimension: dimension)
+        let dendrogramLength = (pointCount - 1) * 4
         var dendrogram = [Double](repeating: 0, count: dendrogramLength)
 
         // MARK: - Fastcluster FFI Boundary
         let status = normalized.withUnsafeBufferPointer { normalizedPointer in
-            dendrogram.withUnsafeMutableBufferPointer { dendrogramPointer in
-                fastcluster_compute_centroid_linkage(
-                    normalizedPointer.baseAddress,
-                    count,
-                    dimension,
-                    dendrogramPointer.baseAddress,
-                    dendrogramLength
-                )
+            groups.weights.withUnsafeBufferPointer { weightsPointer in
+                dendrogram.withUnsafeMutableBufferPointer { dendrogramPointer in
+                    fastcluster_compute_centroid_linkage_weighted(
+                        normalizedPointer.baseAddress,
+                        pointCount,
+                        dimension,
+                        weightsPointer.baseAddress,
+                        dendrogramPointer.baseAddress,
+                        dendrogramLength
+                    )
+                }
             }
         }
 
@@ -57,15 +89,61 @@ public struct AHCClustering {
         }
 
         let distanceThreshold = clampDistanceThreshold(threshold)
-        let assignments = assignmentsFromDendrogram(
+        let pointAssignments = assignmentsFromDendrogram(
             dendrogram,
-            count: count,
+            count: pointCount,
             distanceThreshold: distanceThreshold
         )
 
-        let result = remapClusterIds(assignments)
-        signposter.endInterval("Agglomerative Hierarchical Clustering", ahcState)
-        return result
+        // Labels are renumbered by first appearance in ROW order, so they
+        // depend only on the partition, not on how points were indexed.
+        return remapClusterIds(groups.rowToPoint.map { pointAssignments[$0] })
+    }
+
+    // MARK: - Exact-duplicate collapsing
+
+    struct DuplicateGroups {
+        /// Point index of every input row.
+        let rowToPoint: [Int]
+        /// Representative (first) row of every point, in first-appearance order.
+        let pointRows: [Int]
+        /// Copies per point.
+        let weights: [Int32]
+    }
+
+    /// Groups bit-identical rows. Hash buckets are confirmed element by element
+    /// on bit patterns, so a hash collision never merges two different rows.
+    static func exactDuplicateGroups(_ rows: [[Double]]) -> DuplicateGroups {
+        var rowToPoint = [Int](repeating: 0, count: rows.count)
+        var pointRows: [Int] = []
+        var weights: [Int32] = []
+        var buckets: [Int: [Int]] = [:]
+        buckets.reserveCapacity(rows.count)
+        for (row, values) in rows.enumerated() {
+            var hasher = Hasher()
+            hasher.combine(values.count)
+            for value in values { hasher.combine(value.bitPattern) }
+            let key = hasher.finalize()
+            if let match = buckets[key]?.first(where: { bitIdentical(rows[pointRows[$0]], values) }) {
+                rowToPoint[row] = match
+                weights[match] += 1
+            } else {
+                let point = pointRows.count
+                pointRows.append(row)
+                weights.append(1)
+                buckets[key, default: []].append(point)
+                rowToPoint[row] = point
+            }
+        }
+        return DuplicateGroups(rowToPoint: rowToPoint, pointRows: pointRows, weights: weights)
+    }
+
+    private static func bitIdentical(_ a: [Double], _ b: [Double]) -> Bool {
+        guard a.count == b.count else { return false }
+        for i in 0..<a.count where a[i].bitPattern != b[i].bitPattern {
+            return false
+        }
+        return true
     }
 
     // MARK: - L2 Feature Normalization
