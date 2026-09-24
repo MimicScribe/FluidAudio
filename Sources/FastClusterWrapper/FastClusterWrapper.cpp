@@ -23,6 +23,27 @@
 
 namespace {
 
+// Squared Euclidean distance with 8 independent partial sums. A single running
+// sum is one long chain of dependent adds (the compiler may not reorder float
+// adds), which made this the bottleneck of centroid AHC; independent sums let
+// the adds overlap. The summation order is fixed, so results are
+// deterministic; they differ from a sequential sum by a few ULP.
+inline t_float squaredDistance(const t_float *pi, const t_float *pj, const t_index dimension) {
+    t_float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    t_index k = 0;
+    for (; k + 8 <= dimension; k += 8) {
+        for (int lane = 0; lane < 8; ++lane) {
+            const t_float diff = pi[k + lane] - pj[k + lane];
+            acc[lane] += diff * diff;
+        }
+    }
+    for (; k < dimension; ++k) {
+        const t_float diff = pi[k] - pj[k];
+        acc[0] += diff * diff;
+    }
+    return ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+}
+
 struct CentroidDissimilarity {
     const t_float *data;
     const t_index dimension;
@@ -45,11 +66,7 @@ struct CentroidDissimilarity {
     t_float sqeuclidean(const t_index i, const t_index j) const {
         const t_float *pi = basePointer(i);
         const t_float *pj = basePointer(j);
-        t_float sum = 0;
-        for (t_index k = 0; k < dimension; ++k) {
-            const t_float diff = pi[k] - pj[k];
-            sum += diff * diff;
-        }
+        t_float sum = squaredDistance(pi, pj, dimension);
         if constexpr (checkNaN) {
 #if HAVE_DIAGNOSTIC
 #pragma GCC diagnostic push
@@ -68,11 +85,7 @@ struct CentroidDissimilarity {
     t_float sqeuclidean_extended(const t_index i, const t_index j) const {
         const t_float *pi = extendedPointer(i);
         const t_float *pj = extendedPointer(j);
-        t_float sum = 0;
-        for (t_index k = 0; k < dimension; ++k) {
-            const t_float diff = pi[k] - pj[k];
-            sum += diff * diff;
-        }
+        t_float sum = squaredDistance(pi, pj, dimension);
 #if HAVE_DIAGNOSTIC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wfloat-equal"
@@ -84,6 +97,13 @@ struct CentroidDissimilarity {
 #pragma GCC diagnostic pop
 #endif
         return sum;
+    }
+
+    // Same value as sqeuclidean_extended, without the NaN throw: the parallel
+    // scans must not throw inside a dispatch block, so they flag NaN and throw
+    // after the scan.
+    t_float sqeuclidean_extended_nothrow(const t_index i, const t_index j) const {
+        return squaredDistance(extendedPointer(i), extendedPointer(j), dimension);
     }
 
     void merge(const t_index i, const t_index j, const t_index newNode) {
@@ -193,6 +213,8 @@ void generateSciPyDendrogram(t_float *Z, cluster_result &Z2, const t_index N) {
 
 } // namespace
 
+#include "CentroidLinkageParallel.hpp"
+
 fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
     const double *data,
     size_t pointCount,
@@ -228,7 +250,7 @@ fastcluster_wrapper_status fastcluster_compute_centroid_linkage(
 
         CentroidDissimilarity dist(data, N, dim);
         cluster_result result(N - 1);
-        generic_linkage_vector_alternative<METHOD_VECTOR_CENTROID>(N, dist, result);
+        centroidLinkageParallel(N, dist, result);
         dist.postprocess(result);
         generateSciPyDendrogram<true>(dendrogramOut, result, N);
         return FASTCLUSTER_WRAPPER_SUCCESS;
