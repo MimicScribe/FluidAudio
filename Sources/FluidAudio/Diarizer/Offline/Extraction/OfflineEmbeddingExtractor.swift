@@ -300,6 +300,24 @@ struct OfflineEmbeddingExtractor {
         audioSource: AudioSampleSource,
         segmentationStream: S
     ) async throws -> [TimedEmbedding] where S.Element == SegmentationChunk {
+        try await extractEmbeddings(
+            audioSource: audioSource,
+            segmentationStream: segmentationStream,
+            carryIn: nil,
+            captureCarryAfterChunk: nil
+        ).embeddings
+    }
+
+    /// `carryIn` resumes a full pass mid-batch (see `EmbeddingSkipCarry`);
+    /// `captureCarryAfterChunk` returns the skip state as it stood right after
+    /// that (call-local) chunk index was processed. Both nil = the plain call.
+    func extractEmbeddings<S: AsyncSequence>(
+        audioSource: AudioSampleSource,
+        segmentationStream: S,
+        carryIn: EmbeddingSkipCarry?,
+        captureCarryAfterChunk: Int?
+    ) async throws -> (embeddings: [TimedEmbedding], carryOut: EmbeddingSkipCarry?)
+    where S.Element == SegmentationChunk {
         var embeddings: [TimedEmbedding] = []
         embeddings.reserveCapacity(config.embeddingBatchSize * 8)
 
@@ -340,6 +358,17 @@ struct OfflineEmbeddingExtractor {
         // Cleared between FBANK batches to prevent stale cross-batch hits,
         // since speaker indices are local to each powerset chunk, not global IDs.
         var embeddingCache: [Int: CachedSpeakerEmbedding] = [:]
+        // Resume mid-batch: windows of the current batch already processed by a
+        // previous call, and that call's cache. The first flush comes when the
+        // GLOBAL batch completes, so later batch boundaries line up with a full pass.
+        var batchPhase = 0
+        if let carryIn, carryIn.batchPhase > 0, carryIn.batchPhase < fbankBatchLimit {
+            batchPhase = carryIn.batchPhase
+            for (slot, entry) in carryIn.entries {
+                embeddingCache[slot] = CachedSpeakerEmbedding(mask: entry.mask, embedding: entry.embedding)
+            }
+        }
+        var carryOut: EmbeddingSkipCarry?
         var skippedEmbeddingCount = 0
 
         // Hoist threshold extraction outside the hot loop — config is immutable during extraction.
@@ -648,6 +677,17 @@ struct OfflineEmbeddingExtractor {
 
             for index in 0..<batchInfos.count {
                 try await processChunk(info: batchInfos[index], fbankFeatures: fbankOutputs[index])
+                if let captureCarryAfterChunk, batchInfos[index].chunkIndex == captureCarryAfterChunk {
+                    let phase = batchPhase + index + 1
+                    carryOut =
+                        phase == fbankBatchLimit
+                        ? .empty
+                        : EmbeddingSkipCarry(
+                            entries: embeddingCache.mapValues {
+                                EmbeddingSkipCarry.Entry(mask: $0.mask, embedding: $0.embedding)
+                            },
+                            batchPhase: phase)
+                }
             }
 
             // Clear embedding skip cache AFTER processing this batch, before the next.
@@ -658,6 +698,7 @@ struct OfflineEmbeddingExtractor {
             if skipThreshold != nil {
                 embeddingCache.removeAll(keepingCapacity: true)
             }
+            batchPhase = 0
 
             batchAudioInputs.removeAll(keepingCapacity: true)
             batchInfos.removeAll(keepingCapacity: true)
@@ -722,7 +763,7 @@ struct OfflineEmbeddingExtractor {
                 )
             )
 
-            if batchAudioInputs.count == fbankBatchLimit {
+            if batchPhase + batchAudioInputs.count == fbankBatchLimit {
                 try await flushFbankBatch()
             }
         }
@@ -765,7 +806,7 @@ struct OfflineEmbeddingExtractor {
             Self.emitProfileLog(message)
         }
 
-        return embeddings
+        return (embeddings, carryOut)
     }
 
     private func runFbankModel(

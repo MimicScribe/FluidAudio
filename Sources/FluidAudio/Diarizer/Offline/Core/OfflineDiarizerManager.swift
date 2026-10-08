@@ -213,6 +213,23 @@ public final class OfflineDiarizerManager {
         audioLoadingSeconds: TimeInterval = 0,
         progressCallback: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> PreparedDiarization {
+        try await prepare(
+            audioSource: audioSource,
+            audioLoadingSeconds: audioLoadingSeconds,
+            progressCallback: progressCallback,
+            skipCarryIn: nil,
+            captureSkipCarryAfterChunk: nil
+        )
+    }
+
+    /// `prepare` that resumes / captures the embedding-skip cache (`EmbeddingSkipCarry`).
+    func prepare(
+        audioSource: AudioSampleSource,
+        audioLoadingSeconds: TimeInterval,
+        progressCallback: (@Sendable (Int, Int) -> Void)?,
+        skipCarryIn: EmbeddingSkipCarry?,
+        captureSkipCarryAfterChunk: Int?
+    ) async throws -> PreparedDiarization {
         try config.validate()
         if models == nil {
             try await prepareModels()
@@ -263,7 +280,7 @@ public final class OfflineDiarizerManager {
         }
 
         let embeddingTask = Task.detached(priority: .userInitiated) {
-            [capturedModels, capturedConfig] () throws -> ([TimedEmbedding], TimeInterval) in
+            [capturedModels, capturedConfig] () throws -> (([TimedEmbedding], EmbeddingSkipCarry?), TimeInterval) in
             let extractor = OfflineEmbeddingExtractor(
                 fbankModel: capturedModels.fbankModel,
                 embeddingModel: capturedModels.embeddingModel,
@@ -271,15 +288,17 @@ public final class OfflineDiarizerManager {
                 config: capturedConfig
             )
             let start = Date()
-            let embeddings = try await extractor.extractEmbeddings(
+            let extracted = try await extractor.extractEmbeddings(
                 audioSource: audioSource,
-                segmentationStream: chunkStream
+                segmentationStream: chunkStream,
+                carryIn: skipCarryIn,
+                captureCarryAfterChunk: captureSkipCarryAfterChunk
             )
-            return (embeddings, Date().timeIntervalSince(start))
+            return ((extracted.embeddings, extracted.carryOut), Date().timeIntervalSince(start))
         }
 
         let segmentationResult: (SegmentationOutput, TimeInterval)
-        let embeddingResult: ([TimedEmbedding], TimeInterval)
+        let embeddingResult: (([TimedEmbedding], EmbeddingSkipCarry?), TimeInterval)
         do {
             async let awaitedSegmentation = segmentationTask.value
             async let awaitedEmbeddings = embeddingTask.value
@@ -295,7 +314,7 @@ public final class OfflineDiarizerManager {
         let (segmentation, segmentationTime) = segmentationResult
         logger.debug("Segmentation completed in \(segmentationTime)s (async)")
 
-        let (timedEmbeddings, embeddingTime) = embeddingResult
+        let ((timedEmbeddings, skipCarryOut), embeddingTime) = embeddingResult
         logger.debug("Embedding extraction produced \(timedEmbeddings.count) vectors in \(embeddingTime)s (async)")
 
         return PreparedDiarization(
@@ -305,7 +324,8 @@ public final class OfflineDiarizerManager {
             audioLoadingSeconds: audioLoadingSeconds,
             segmentationSeconds: segmentationTime,
             embeddingExtractionSeconds: embeddingTime,
-            prepareWallSeconds: Date().timeIntervalSince(prepareStart)
+            prepareWallSeconds: Date().timeIntervalSince(prepareStart),
+            skipCarryOut: skipCarryOut
         )
     }
 
@@ -565,6 +585,9 @@ public final class OfflineDiarizerManager {
         public let audioLoadingSeconds: TimeInterval
         public let segmentationSeconds: TimeInterval
         public let embeddingSeconds: TimeInterval
+        /// Embedding-skip state after `captureSkipCarryAfterChunk`; nil when not
+        /// requested or that chunk was never batched (`EmbeddingSkipCarry`).
+        public let skipCarryOut: EmbeddingSkipCarry?
 
         public init(
             chunkEmbeddings: [ChunkEmbedding],
@@ -572,8 +595,10 @@ public final class OfflineDiarizerManager {
             timedEmbeddingMetadata: [TimedEmbeddingMetadata],
             audioLoadingSeconds: TimeInterval,
             segmentationSeconds: TimeInterval,
-            embeddingSeconds: TimeInterval
+            embeddingSeconds: TimeInterval,
+            skipCarryOut: EmbeddingSkipCarry? = nil
         ) {
+            self.skipCarryOut = skipCarryOut
             self.chunkEmbeddings = chunkEmbeddings
             self.segmentation = segmentation
             self.timedEmbeddingMetadata = timedEmbeddingMetadata
@@ -640,9 +665,29 @@ public final class OfflineDiarizerManager {
         audioSource: AudioSampleSource,
         audioLoadingSeconds: TimeInterval
     ) async throws -> PreClusteringResult {
+        try await extractChunkEmbeddings(
+            audioSource: audioSource,
+            audioLoadingSeconds: audioLoadingSeconds,
+            skipCarryIn: nil,
+            captureSkipCarryAfterChunk: nil
+        )
+    }
+
+    /// Slice extraction that resumes a full pass mid-batch: `skipCarryIn` is the
+    /// previous slice's `skipCarryOut`; `captureSkipCarryAfterChunk` is this
+    /// slice's last committed (slice-local) chunk index. See `EmbeddingSkipCarry`.
+    public func extractChunkEmbeddings(
+        audioSource: AudioSampleSource,
+        audioLoadingSeconds: TimeInterval,
+        skipCarryIn: EmbeddingSkipCarry?,
+        captureSkipCarryAfterChunk: Int?
+    ) async throws -> PreClusteringResult {
         let prepared = try await prepare(
             audioSource: audioSource,
-            audioLoadingSeconds: audioLoadingSeconds
+            audioLoadingSeconds: audioLoadingSeconds,
+            progressCallback: nil,
+            skipCarryIn: skipCarryIn,
+            captureSkipCarryAfterChunk: captureSkipCarryAfterChunk
         )
         let timedEmbeddings = prepared.timedEmbeddings
 
@@ -680,7 +725,8 @@ public final class OfflineDiarizerManager {
             timedEmbeddingMetadata: timedEmbeddingMetadata,
             audioLoadingSeconds: prepared.audioLoadingSeconds,
             segmentationSeconds: prepared.segmentationSeconds,
-            embeddingSeconds: prepared.embeddingExtractionSeconds
+            embeddingSeconds: prepared.embeddingExtractionSeconds,
+            skipCarryOut: prepared.skipCarryOut
         )
     }
 

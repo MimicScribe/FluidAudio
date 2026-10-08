@@ -20,6 +20,10 @@ public struct PreparedDiarization: Sendable {
 
     let prepareWallSeconds: TimeInterval
 
+    /// Skip-cache state captured after the requested chunk (`EmbeddingSkipCarry`);
+    /// nil when no capture was requested or that chunk was never batched.
+    var skipCarryOut: EmbeddingSkipCarry? = nil
+
     public var embeddingCount: Int { timedEmbeddings.count }
 
     public var segmentationChunkCount: Int { segmentation.numChunks }
