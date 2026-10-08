@@ -218,17 +218,20 @@ public final class OfflineDiarizerManager {
             audioLoadingSeconds: audioLoadingSeconds,
             progressCallback: progressCallback,
             skipCarryIn: nil,
-            captureSkipCarryAfterChunk: nil
+            captureSkipCarryAfterChunk: nil,
+            maxChunks: nil
         )
     }
 
-    /// `prepare` that resumes / captures the embedding-skip cache (`EmbeddingSkipCarry`).
+    /// `prepare` that resumes / captures the embedding-skip cache (`EmbeddingSkipCarry`)
+    /// and can stop after `maxChunks` windows.
     func prepare(
         audioSource: AudioSampleSource,
         audioLoadingSeconds: TimeInterval,
         progressCallback: (@Sendable (Int, Int) -> Void)?,
         skipCarryIn: EmbeddingSkipCarry?,
-        captureSkipCarryAfterChunk: Int?
+        captureSkipCarryAfterChunk: Int?,
+        maxChunks: Int?
     ) async throws -> PreparedDiarization {
         try config.validate()
         if models == nil {
@@ -269,7 +272,8 @@ public final class OfflineDiarizerManager {
                         @unknown default:
                             return .stop
                         }
-                    }
+                    },
+                    maxChunks: maxChunks
                 )
                 chunkContinuation.finish()
                 return (segmentation, Date().timeIntervalSince(start))
@@ -676,18 +680,23 @@ public final class OfflineDiarizerManager {
     /// Slice extraction that resumes a full pass mid-batch: `skipCarryIn` is the
     /// previous slice's `skipCarryOut`; `captureSkipCarryAfterChunk` is this
     /// slice's last committed (slice-local) chunk index. See `EmbeddingSkipCarry`.
+    /// `maxChunks` stops after that many windows: a slice that commits N windows
+    /// would otherwise also segment and embed the ~7 partial windows that start
+    /// inside its last window's read and are discarded.
     public func extractChunkEmbeddings(
         audioSource: AudioSampleSource,
         audioLoadingSeconds: TimeInterval,
         skipCarryIn: EmbeddingSkipCarry?,
-        captureSkipCarryAfterChunk: Int?
+        captureSkipCarryAfterChunk: Int?,
+        maxChunks: Int? = nil
     ) async throws -> PreClusteringResult {
         let prepared = try await prepare(
             audioSource: audioSource,
             audioLoadingSeconds: audioLoadingSeconds,
             progressCallback: nil,
             skipCarryIn: skipCarryIn,
-            captureSkipCarryAfterChunk: captureSkipCarryAfterChunk
+            captureSkipCarryAfterChunk: captureSkipCarryAfterChunk,
+            maxChunks: maxChunks
         )
         let timedEmbeddings = prepared.timedEmbeddings
 

@@ -680,7 +680,7 @@ struct OfflineEmbeddingExtractor {
                 if let captureCarryAfterChunk, batchInfos[index].chunkIndex == captureCarryAfterChunk {
                     let phase = batchPhase + index + 1
                     carryOut =
-                        phase == fbankBatchLimit
+                        phase >= fbankBatchLimit
                         ? .empty
                         : EmbeddingSkipCarry(
                             entries: embeddingCache.mapValues {

@@ -41,11 +41,14 @@ struct OfflineSegmentationProcessor {
         )
     }
 
+    /// `maxChunks`: emit only the first N windows (a slice that commits N
+    /// windows needs no trailing partial windows). nil = every window.
     func process(
         audioSource: AudioSampleSource,
         segmentationModel: MLModel,
         config: OfflineDiarizerConfig,
-        chunkHandler: SegmentationChunkHandler? = nil
+        chunkHandler: SegmentationChunkHandler? = nil,
+        maxChunks: Int? = nil
     ) async throws -> SegmentationOutput {
         let totalSamples = audioSource.sampleCount
         guard totalSamples > 0 else {
@@ -201,7 +204,8 @@ struct OfflineSegmentationProcessor {
         }
 
         var processedAnyBatch = false
-        var offsetIterator = stride(from: 0, to: totalSamples, by: stepSize).makeIterator()
+        let offsetLimit = maxChunks.map { min(totalSamples, max(1, $0) * stepSize) } ?? totalSamples
+        var offsetIterator = stride(from: 0, to: offsetLimit, by: stepSize).makeIterator()
         var batchOffsets: [Int] = []
         batchOffsets.reserveCapacity(batchCapacity)
 
