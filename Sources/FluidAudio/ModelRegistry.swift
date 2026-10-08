@@ -133,7 +133,7 @@ public enum ModelRegistry {
             configuration.connectionProxyDictionary = proxyConfig
         }
 
-        return URLSession(configuration: configuration)
+        return NetworkActivity.session(configuration: configuration)
     }
 
     // MARK: - Proxy Configuration (macOS only)

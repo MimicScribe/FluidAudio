@@ -419,7 +419,7 @@ public enum ModelHub {
         try ensureOnlineAllowed("download(\(repo.folderName))")
         logger.info("Downloading \(repo.folderName) from HuggingFace...")
 
-        let listingSession = configuration.map { URLSession(configuration: $0) } ?? session
+        let listingSession = configuration.map { NetworkActivity.session(configuration: $0) } ?? session
         defer {
             if configuration != nil { listingSession.finishTasksAndInvalidate() }
         }
@@ -588,7 +588,7 @@ public enum ModelHub {
     ) async throws {
         try ensureOnlineAllowed("download(\(repo.folderName)/\(subdirectory))")
 
-        let listingSession = configuration.map { URLSession(configuration: $0) } ?? session
+        let listingSession = configuration.map { NetworkActivity.session(configuration: $0) } ?? session
         defer {
             if configuration != nil { listingSession.finishTasksAndInvalidate() }
         }

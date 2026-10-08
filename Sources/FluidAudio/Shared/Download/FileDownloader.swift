@@ -135,7 +135,7 @@ enum FileDownloader {
         configuration: URLSessionConfiguration? = nil
     ) async throws -> Data {
         let request = HFClient.authorizedRequest(url: url)
-        let session = configuration.map { URLSession(configuration: $0) } ?? HFClient.session
+        let session = configuration.map { NetworkActivity.session(configuration: $0) } ?? HFClient.session
         defer {
             if configuration != nil { session.finishTasksAndInvalidate() }
         }
@@ -616,6 +616,12 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate,
         } else if state.withLockUnchecked({ $0.writeError }) != nil {
             cancel()
         }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        NetworkActivity.report(task: task, metrics: metrics)
     }
 
     func urlSession(
