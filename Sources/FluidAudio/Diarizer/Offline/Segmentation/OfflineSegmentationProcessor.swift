@@ -48,7 +48,8 @@ struct OfflineSegmentationProcessor {
         segmentationModel: MLModel,
         config: OfflineDiarizerConfig,
         chunkHandler: SegmentationChunkHandler? = nil,
-        maxChunks: Int? = nil
+        maxChunks: Int? = nil,
+        warmup: Bool = true
     ) async throws -> SegmentationOutput {
         let totalSamples = audioSource.sampleCount
         guard totalSamples > 0 else {
@@ -210,7 +211,7 @@ struct OfflineSegmentationProcessor {
         batchOffsets.reserveCapacity(batchCapacity)
 
         do {
-            try await performWarmup()
+            if warmup { try await performWarmup() }
         } catch {
             logger.debug("Segmentation warmup skipped due to error: \(error.localizedDescription)")
         }

@@ -304,7 +304,8 @@ struct OfflineEmbeddingExtractor {
             audioSource: audioSource,
             segmentationStream: segmentationStream,
             carryIn: nil,
-            captureCarryAfterChunk: nil
+            captureCarryAfterChunk: nil,
+            warmup: true
         ).embeddings
     }
 
@@ -315,7 +316,8 @@ struct OfflineEmbeddingExtractor {
         audioSource: AudioSampleSource,
         segmentationStream: S,
         carryIn: EmbeddingSkipCarry?,
-        captureCarryAfterChunk: Int?
+        captureCarryAfterChunk: Int?,
+        warmup: Bool
     ) async throws -> (embeddings: [TimedEmbedding], carryOut: EmbeddingSkipCarry?)
     where S.Element == SegmentationChunk {
         var embeddings: [TimedEmbedding] = []
@@ -705,7 +707,7 @@ struct OfflineEmbeddingExtractor {
         }
 
         do {
-            try performEmbeddingWarmup()
+            if warmup { try performEmbeddingWarmup() }
         } catch {
             logger.debug("Embedding warmup skipped due to error: \(error.localizedDescription)")
         }

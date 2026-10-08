@@ -219,7 +219,8 @@ public final class OfflineDiarizerManager {
             progressCallback: progressCallback,
             skipCarryIn: nil,
             captureSkipCarryAfterChunk: nil,
-            maxChunks: nil
+            maxChunks: nil,
+            warmup: true
         )
     }
 
@@ -231,7 +232,8 @@ public final class OfflineDiarizerManager {
         progressCallback: (@Sendable (Int, Int) -> Void)?,
         skipCarryIn: EmbeddingSkipCarry?,
         captureSkipCarryAfterChunk: Int?,
-        maxChunks: Int?
+        maxChunks: Int?,
+        warmup: Bool
     ) async throws -> PreparedDiarization {
         try config.validate()
         if models == nil {
@@ -273,7 +275,8 @@ public final class OfflineDiarizerManager {
                             return .stop
                         }
                     },
-                    maxChunks: maxChunks
+                    maxChunks: maxChunks,
+                    warmup: warmup
                 )
                 chunkContinuation.finish()
                 return (segmentation, Date().timeIntervalSince(start))
@@ -296,7 +299,8 @@ public final class OfflineDiarizerManager {
                 audioSource: audioSource,
                 segmentationStream: chunkStream,
                 carryIn: skipCarryIn,
-                captureCarryAfterChunk: captureSkipCarryAfterChunk
+                captureCarryAfterChunk: captureSkipCarryAfterChunk,
+                warmup: warmup
             )
             return ((extracted.embeddings, extracted.carryOut), Date().timeIntervalSince(start))
         }
@@ -682,13 +686,16 @@ public final class OfflineDiarizerManager {
     /// slice's last committed (slice-local) chunk index. See `EmbeddingSkipCarry`.
     /// `maxChunks` stops after that many windows: a slice that commits N windows
     /// would otherwise also segment and embed the ~7 partial windows that start
-    /// inside its last window's read and are discarded.
+    /// inside its last window's read and are discarded. `warmup: false` skips
+    /// the zero-input warmup inferences when the models are already warm (a
+    /// live slice every few seconds); outputs do not depend on it.
     public func extractChunkEmbeddings(
         audioSource: AudioSampleSource,
         audioLoadingSeconds: TimeInterval,
         skipCarryIn: EmbeddingSkipCarry?,
         captureSkipCarryAfterChunk: Int?,
-        maxChunks: Int? = nil
+        maxChunks: Int? = nil,
+        warmup: Bool = true
     ) async throws -> PreClusteringResult {
         let prepared = try await prepare(
             audioSource: audioSource,
@@ -696,7 +703,8 @@ public final class OfflineDiarizerManager {
             progressCallback: nil,
             skipCarryIn: skipCarryIn,
             captureSkipCarryAfterChunk: captureSkipCarryAfterChunk,
-            maxChunks: maxChunks
+            maxChunks: maxChunks,
+            warmup: warmup
         )
         let timedEmbeddings = prepared.timedEmbeddings
 
