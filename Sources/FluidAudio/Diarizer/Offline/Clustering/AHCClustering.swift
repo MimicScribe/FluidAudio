@@ -100,6 +100,66 @@ public struct AHCClustering {
         return remapClusterIds(groups.rowToPoint.map { pointAssignments[$0] })
     }
 
+    // MARK: - Incremental (savepoint) clustering
+
+    /// Centroid-linkage AHC over points that may already be GROUPS (MimicScribe
+    /// fork, live incremental clustering). Each point is used as given — a group's
+    /// true centroid (the weighted mean of its unit rows, NOT re-normalized), or a
+    /// new unit row — weighted by its member count, so centroid linkage treats a
+    /// group exactly as the merged node of its members. Cut at `threshold` (the
+    /// partition) and at `savepointThreshold` (the tight groups a caller keeps as
+    /// the next run's savepoint; ≤ `threshold`). Rows are not deduplicated here.
+    ///
+    /// A savepoint run is not identical to clustering every row from scratch: a
+    /// merge frozen in the savepoint is never undone. Live sim 2026-10-20 (22
+    /// recordings, savepoint at 0.7 × the cut, full refresh every 10 min): 99.99 %
+    /// median / 98.9 % worst-file row agreement with a full run, ~6× fewer points.
+    /// The after-Stop pipeline keeps `cluster(embeddingFeatures:threshold:)`.
+    public func clusterWeightedPoints(
+        points: [[Double]],
+        weights: [Int32],
+        threshold: Double,
+        savepointThreshold: Double
+    ) -> (labels: [Int], savepointLabels: [Int]) {
+        let count = points.count
+        guard count > 0, weights.count == count else { return ([], []) }
+        guard let dimension = points.first?.count, dimension > 0, count > 1 else {
+            return (Array(repeating: 0, count: count), Array(repeating: 0, count: count))
+        }
+        var flat = [Double]()
+        flat.reserveCapacity(count * dimension)
+        for point in points {
+            precondition(point.count == dimension, "All points must share the same dimension")
+            flat.append(contentsOf: point)
+        }
+        let dendrogramLength = (count - 1) * 4
+        var dendrogram = [Double](repeating: 0, count: dendrogramLength)
+        let status = flat.withUnsafeBufferPointer { flatPointer in
+            weights.withUnsafeBufferPointer { weightsPointer in
+                dendrogram.withUnsafeMutableBufferPointer { dendrogramPointer in
+                    fastcluster_compute_centroid_linkage_weighted(
+                        flatPointer.baseAddress,
+                        count,
+                        dimension,
+                        weightsPointer.baseAddress,
+                        dendrogramPointer.baseAddress,
+                        dendrogramLength
+                    )
+                }
+            }
+        }
+        guard status == FASTCLUSTER_WRAPPER_SUCCESS else {
+            logger.error("fastcluster (weighted points) failed with status \(status.rawValue)")
+            return (Array(0..<count), Array(0..<count))
+        }
+        let cut = clampDistanceThreshold(threshold)
+        let tight = min(cut, clampDistanceThreshold(savepointThreshold))
+        return (
+            remapClusterIds(assignmentsFromDendrogram(dendrogram, count: count, distanceThreshold: cut)),
+            remapClusterIds(assignmentsFromDendrogram(dendrogram, count: count, distanceThreshold: tight))
+        )
+    }
+
     // MARK: - Exact-duplicate collapsing
 
     struct DuplicateGroups {
