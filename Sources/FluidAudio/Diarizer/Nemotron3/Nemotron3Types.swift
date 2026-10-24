@@ -51,7 +51,23 @@ public struct Nemotron3Config: Sendable {
     /// subject to the monolithic graph's chunk-length ANECCompile cliff.
     public var splitGraph: Bool = false
 
+    /// Encoder frames the model's `chunk` input actually holds, when larger than this config's
+    /// `chunkEncFrames`: lets a short-step config (e.g. `fast128`'s lc 0 + 128 + rc 4) drive a model
+    /// exported with a bigger fixed chunk (the offline 380-frame one). Input buffers are zero-padded to
+    /// this capacity and `chunk_lengths` carries the valid length, so the model masks the padding
+    /// (fp16-rounding equivalent to the native export). nil = `chunkEncFrames`. Monolithic graphs only.
+    public var modelChunkEncFrames: Int? = nil
+
     // MARK: Derived
+
+    /// Encoder frames of the model's chunk input buffer (>= `chunkEncFrames`).
+    public var inputChunkEncFrames: Int { max(chunkEncFrames, modelChunkEncFrames ?? chunkEncFrames) }
+
+    /// Mel frames of the model's chunk input buffer.
+    public var inputChunkMelFrames: Int { inputChunkEncFrames * subsamplingFactor }
+
+    /// Packed output length of the model (spkcache + fifo + its chunk capacity).
+    public var inputPackedFrames: Int { spkcacheLen + fifoLen + inputChunkEncFrames }
 
     /// Mel frames the CoreML `chunk` input expects: (lc + chunk + rc) * 8.
     public var chunkMelFrames: Int {

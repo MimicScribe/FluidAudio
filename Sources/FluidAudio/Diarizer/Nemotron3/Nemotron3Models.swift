@@ -50,7 +50,7 @@ public struct Nemotron3Models {
 
         self.memoryOptimizer = .init()
         self.chunkArray = try memoryOptimizer.createAlignedArray(
-            shape: [1, NSNumber(value: config.chunkMelFrames), NSNumber(value: config.melFeatures)],
+            shape: [1, NSNumber(value: config.inputChunkMelFrames), NSNumber(value: config.melFeatures)],
             dataType: .float32)
         self.spkcacheArray = try memoryOptimizer.createAlignedArray(
             shape: [1, NSNumber(value: config.spkcacheLen), NSNumber(value: config.preEncoderDims)],
@@ -83,7 +83,7 @@ public struct Nemotron3Models {
         // Typed from the model's output description: some runtimes reject a backing whose
         // type differs from the declared one (#951). Plain MLMultiArrays are contiguous,
         // which also simplifies readback.
-        let t = config.packedFrames
+        let t = config.inputPackedFrames
         let up = config.upsampleFactor
         let s = config.numSpeakers
         self.predsBacking = try Self.outputBacking(
@@ -94,7 +94,7 @@ public struct Nemotron3Models {
             self.embsBacking = nil
         } else {
             self.embsBacking = try Self.outputBacking(
-                model, "chunk_pre_encode_embs", shape: [1, config.chunkEncFrames, config.preEncoderDims])
+                model, "chunk_pre_encode_embs", shape: [1, config.inputChunkEncFrames, config.preEncoderDims])
         }
         let options = MLPredictionOptions()
         var backings: [String: MLMultiArray] = [
