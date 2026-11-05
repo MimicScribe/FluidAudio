@@ -1,3 +1,4 @@
+import Accelerate
 import CoreML
 import Foundation
 import os
@@ -32,16 +33,27 @@ public enum SilenceAwareFbank {
     }
 
     /// Marks each frame whose samples are all exactly zero.
+    ///
+    /// vDSP, no per-window allocation beyond the result: one min-magnitude pass
+    /// answers "any zero at all?" (most windows), then one max-magnitude per
+    /// frame. vDSP runs optimised even in a debug build, where the earlier
+    /// scalar prefix-sum scan cost ~34 ms per window with zeros. Same result:
+    /// a frame is silent iff every sample in it is 0 (or -0); a frame that
+    /// starts at or past the end of `audio` is silent.
     public static func silentFrames(audio: UnsafeBufferPointer<Float>, frameCount: Int) -> [Bool] {
-        guard audio.contains(0) else { return [Bool](repeating: false, count: frameCount) }
-        var nonZeroBefore = [Int](repeating: 0, count: audio.count + 1)
-        for index in 0..<audio.count {
-            nonZeroBefore[index + 1] = nonZeroBefore[index] + (audio[index] != 0 ? 1 : 0)
+        guard let base = audio.baseAddress, !audio.isEmpty else {
+            return [Bool](repeating: true, count: frameCount)
         }
+        var minMagnitude: Float = 0
+        vDSP_minmgv(base, 1, &minMagnitude, vDSP_Length(audio.count))
+        guard minMagnitude == 0 else { return [Bool](repeating: false, count: frameCount) }
         return (0..<frameCount).map { frame in
             let start = min(frame * frameShift, audio.count)
             let end = min(start + frameLength, audio.count)
-            return nonZeroBefore[end] == nonZeroBefore[start]
+            guard end > start else { return true }
+            var maxMagnitude: Float = 0
+            vDSP_maxmgv(base + start, 1, &maxMagnitude, vDSP_Length(end - start))
+            return maxMagnitude == 0
         }
     }
 
@@ -56,18 +68,20 @@ public enum SilenceAwareFbank {
         frameStride: Int,
         silent: [Bool]
     ) -> Bool {
-        let voiced = silent.indices.filter { !silent[$0] }
-        guard !voiced.isEmpty, voiced.count < silent.count else { return false }
+        let frameCount = silent.count
+        let voicedMask = silent.map { $0 ? Float(0) : Float(1) }
+        let voicedCount = frameCount - silent.lazy.filter { $0 }.count
+        guard voicedCount > 0, voicedCount < frameCount else { return false }
+        // vDSP for the per-band mean (masked dot product) and the shift, so a
+        // debug build does not pay ~10 ms of scalar loops per window. Only the
+        // summation order differs from a scalar loop (float rounding).
+        let scale = 1 / Float(voicedCount)
         for band in 0..<bandCount {
             let row = features + band * bandStride
             var sum: Float = 0
-            for frame in voiced {
-                sum += row[frame * frameStride]
-            }
-            let mean = sum / Float(voiced.count)
-            for frame in silent.indices {
-                row[frame * frameStride] -= mean
-            }
+            vDSP_dotpr(row, vDSP_Stride(frameStride), voicedMask, 1, &sum, vDSP_Length(frameCount))
+            var shift = -sum * scale
+            vDSP_vsadd(row, vDSP_Stride(frameStride), &shift, row, vDSP_Stride(frameStride), vDSP_Length(frameCount))
         }
         return true
     }

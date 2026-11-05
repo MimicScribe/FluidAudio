@@ -77,4 +77,32 @@ final class SilenceAwareFbankTests: XCTestCase {
         let silent = audio.withUnsafeBufferPointer { SilenceAwareFbank.silentFrames(audio: $0, frameCount: 13) }
         XCTAssertEqual(silent, [Bool](repeating: false, count: 13))
     }
+
+    /// The vDSP scan must agree exactly with the original prefix-sum definition
+    /// (upstream #988), including -0, NaN-free noise, short tails and windows
+    /// with no zero.
+    func testVDSPScanMatchesThePrefixSumDefinition() {
+        func reference(_ audio: [Float], _ frameCount: Int) -> [Bool] {
+            var nonZeroBefore = [Int](repeating: 0, count: audio.count + 1)
+            for i in 0..<audio.count { nonZeroBefore[i + 1] = nonZeroBefore[i] + (audio[i] != 0 ? 1 : 0) }
+            return (0..<frameCount).map { f in
+                let start = min(f * 160, audio.count)
+                let end = min(start + 400, audio.count)
+                return nonZeroBefore[end] == nonZeroBefore[start]
+            }
+        }
+        var state: UInt32 = 7
+        func next() -> UInt32 { state = state &* 1_664_525 &+ 1_013_904_223; return state }
+        for trial in 0..<40 {
+            let count = 2_000 + Int(next() % 6_000)
+            var audio = (0..<count).map { _ in Float(Int32(bitPattern: next())) / Float(Int32.max) }
+            for _ in 0..<Int(next() % 6) {
+                let a = Int(next() % UInt32(count)); let b = min(count, a + Int(next() % 1_500))
+                for i in a..<b { audio[i] = (trial % 3 == 0 && i % 7 == 0) ? -0.0 : 0 }
+            }
+            let frameCount = (count - 400) / 160 + 1 + Int(next() % 4)
+            let got = audio.withUnsafeBufferPointer { SilenceAwareFbank.silentFrames(audio: $0, frameCount: frameCount) }
+            XCTAssertEqual(got, reference(audio, frameCount), "trial \(trial)")
+        }
+    }
 }
