@@ -1,3 +1,4 @@
+import CoreML
 import XCTest
 
 @testable import FluidAudio
@@ -50,5 +51,30 @@ final class SilenceAwareFbankTests: XCTestCase {
         XCTAssertFalse(withoutSilence)
         XCTAssertFalse(allSilent)
         XCTAssertEqual(features, [1, 2, 3, 4])
+    }
+
+    func testRecenterInPlaceOnAModelShapedArrayCountsAndMatchesTheFormula() throws {
+        // [1, 1, bands=2, frames=4].
+        let features = try MLMultiArray(shape: [1, 1, 2, 4], dataType: .float32)
+        let values: [Float] = [1, 3, -13.8, -13.8, 2, 6, -13.8, -13.8]
+        for (i, v) in values.enumerated() { features[i] = NSNumber(value: v) }
+        let audio = [Float](repeating: 0.1, count: 300) + [Float](repeating: 0, count: 580)
+        let before = SilenceAwareFbank.counters
+
+        let changed = audio.withUnsafeBufferPointer { SilenceAwareFbank.recenterInPlace(features, audio: $0) }
+
+        XCTAssertEqual(changed, SilenceAwareFbank.isEnabled)
+        guard SilenceAwareFbank.isEnabled else { return }
+        // Signal in [0, 300): frames 0 and 1 hold it (frame 1 covers [160, 560)); frame 2 starts at 320, all zero.
+        XCTAssertEqual(features[0].floatValue, 1 - 2, accuracy: 1e-5)
+        XCTAssertEqual(features[5].floatValue, 6 - 4, accuracy: 1e-5)
+        XCTAssertEqual(SilenceAwareFbank.counters.checked, before.checked + 1)
+        XCTAssertEqual(SilenceAwareFbank.counters.recentered, before.recentered + 1)
+    }
+
+    func testAudioWithoutAnyZeroSkipsTheFrameScan() {
+        let audio = [Float](repeating: 0.1, count: 2_400)
+        let silent = audio.withUnsafeBufferPointer { SilenceAwareFbank.silentFrames(audio: $0, frameCount: 13) }
+        XCTAssertEqual(silent, [Bool](repeating: false, count: 13))
     }
 }

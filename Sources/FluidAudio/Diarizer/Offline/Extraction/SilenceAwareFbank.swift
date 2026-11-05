@@ -1,4 +1,6 @@
+import CoreML
 import Foundation
+import os
 
 /// Re-centers FBANK features on the frames that hold signal (#981).
 ///
@@ -9,13 +11,29 @@ import Foundation
 /// voice. Because the model only subtracts a per-band constant, subtracting the mean of
 /// its output over the non-silent frames gives exactly the features of a model whose
 /// mean excluded the silent frames. Windows without a silent frame are left untouched.
-enum SilenceAwareFbank {
+///
+/// Public so an app running FBank itself (a masked per-sentence extractor) applies the
+/// same correction. Kill switch: `MIMICSCRIBE_SILENCE_FBANK=0`.
+public enum SilenceAwareFbank {
     /// FBANK frame geometry: 25 ms frames every 10 ms at 16 kHz.
-    static let frameLength = 400
-    static let frameShift = 160
+    public static let frameLength = 400
+    public static let frameShift = 160
+
+    /// Off only with `MIMICSCRIBE_SILENCE_FBANK=0`, for a same-binary A/B.
+    public static let isEnabled: Bool =
+        ProcessInfo.processInfo.environment["MIMICSCRIBE_SILENCE_FBANK"] != "0"
+
+    private static let counts = OSAllocatedUnfairLock(initialState: (checked: 0, recentered: 0))
+
+    /// Windows checked and windows re-centered since launch, so a run can prove the
+    /// correction fired on audio that has digital silence.
+    public static var counters: (checked: Int, recentered: Int) {
+        counts.withLock { $0 }
+    }
 
     /// Marks each frame whose samples are all exactly zero.
-    static func silentFrames(audio: UnsafeBufferPointer<Float>, frameCount: Int) -> [Bool] {
+    public static func silentFrames(audio: UnsafeBufferPointer<Float>, frameCount: Int) -> [Bool] {
+        guard audio.contains(0) else { return [Bool](repeating: false, count: frameCount) }
         var nonZeroBefore = [Int](repeating: 0, count: audio.count + 1)
         for index in 0..<audio.count {
             nonZeroBefore[index + 1] = nonZeroBefore[index] + (audio[index] != 0 ? 1 : 0)
@@ -31,7 +49,7 @@ enum SilenceAwareFbank {
     ///
     /// - Returns: `false`, leaving `features` untouched, when no frame or every frame is silent.
     @discardableResult
-    static func recenter(
+    public static func recenter(
         features: UnsafeMutablePointer<Float>,
         bandCount: Int,
         bandStride: Int,
@@ -52,5 +70,25 @@ enum SilenceAwareFbank {
             }
         }
         return true
+    }
+
+    /// Applies the correction in place to one `[1, 1, bands, frames]` float32 FBANK output,
+    /// given the exact audio fed to the model. Returns whether it changed the features.
+    @discardableResult
+    public static func recenterInPlace(_ features: MLMultiArray, audio: UnsafeBufferPointer<Float>) -> Bool {
+        guard isEnabled, features.dataType == .float32, features.shape.count == 4 else { return false }
+        let silent = silentFrames(audio: audio, frameCount: features.shape[3].intValue)
+        let changed = recenter(
+            features: features.dataPointer.assumingMemoryBound(to: Float.self),
+            bandCount: features.shape[2].intValue,
+            bandStride: features.strides[2].intValue,
+            frameStride: features.strides[3].intValue,
+            silent: silent
+        )
+        counts.withLock {
+            $0.checked += 1
+            if changed { $0.recentered += 1 }
+        }
+        return changed
     }
 }

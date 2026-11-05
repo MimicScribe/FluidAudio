@@ -871,23 +871,9 @@ struct OfflineEmbeddingExtractor {
 
     /// Applies `SilenceAwareFbank` to one `[1, 1, bands, frames]` FBANK output in place.
     private func recenterOnSignal(_ features: MLMultiArray, audio: MLMultiArray) {
-        guard features.dataType == .float32, audio.dataType == .float32, features.shape.count == 4 else {
-            return
-        }
-        let bandCount = features.shape[2].intValue
-        let frameCount = features.shape[3].intValue
+        guard audio.dataType == .float32 else { return }
         let audioPointer = audio.dataPointer.assumingMemoryBound(to: Float.self)
-        let silent = SilenceAwareFbank.silentFrames(
-            audio: UnsafeBufferPointer(start: audioPointer, count: audio.count),
-            frameCount: frameCount
-        )
-        SilenceAwareFbank.recenter(
-            features: features.dataPointer.assumingMemoryBound(to: Float.self),
-            bandCount: bandCount,
-            bandStride: features.strides[2].intValue,
-            frameStride: features.strides[3].intValue,
-            silent: silent
-        )
+        SilenceAwareFbank.recenterInPlace(features, audio: UnsafeBufferPointer(start: audioPointer, count: audio.count))
     }
 
     private func prepareFbankInput(
