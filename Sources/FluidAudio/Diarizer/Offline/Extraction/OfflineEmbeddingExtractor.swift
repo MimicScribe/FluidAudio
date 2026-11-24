@@ -824,49 +824,51 @@ struct OfflineEmbeddingExtractor {
         audioArrays: [MLMultiArray]
     ) throws -> [MLMultiArray] {
         guard !audioArrays.isEmpty else { return [] }
-        var providers: [MLFeatureProvider] = []
-        providers.reserveCapacity(audioArrays.count)
-        for array in audioArrays {
-            providers.append(
-                ZeroCopyDiarizerFeatureProvider(
-                    features: [
-                        fbankInputName: MLFeatureValue(multiArray: array)
-                    ]
-                )
-            )
-        }
-
-        let options = MLPredictionOptions()
-        if #available(macOS 14.0, iOS 17.0, *) {
+        return try autoreleasepool {
+            var providers: [MLFeatureProvider] = []
+            providers.reserveCapacity(audioArrays.count)
             for array in audioArrays {
-                array.prefetchToNeuralEngine()
-            }
-        }
-
-        let batchProvider = MLArrayBatchProvider(array: providers)
-        let outputBatch = try fbankModel.predictions(from: batchProvider, options: options)
-        guard outputBatch.count == audioArrays.count else {
-            throw OfflineDiarizationError.processingFailed(
-                "FBANK batch produced \(outputBatch.count) outputs for \(audioArrays.count) inputs"
-            )
-        }
-
-        var results: [MLMultiArray] = []
-        results.reserveCapacity(outputBatch.count)
-        for index in 0..<outputBatch.count {
-            guard
-                let featureArray = outputBatch.features(at: index)
-                    .featureValue(for: fbankOutputName)?.multiArrayValue
-            else {
-                throw OfflineDiarizationError.processingFailed(
-                    "FBANK model missing \(fbankOutputName) output at batch index \(index)"
+                providers.append(
+                    ZeroCopyDiarizerFeatureProvider(
+                        features: [
+                            fbankInputName: MLFeatureValue(multiArray: array)
+                        ]
+                    )
                 )
             }
-            recenterOnSignal(featureArray, audio: audioArrays[index])
-            results.append(featureArray)
-        }
 
-        return results
+            let options = MLPredictionOptions()
+            if #available(macOS 14.0, iOS 17.0, *) {
+                for array in audioArrays {
+                    array.prefetchToNeuralEngine()
+                }
+            }
+
+            let batchProvider = MLArrayBatchProvider(array: providers)
+            let outputBatch = try fbankModel.predictions(from: batchProvider, options: options)
+            guard outputBatch.count == audioArrays.count else {
+                throw OfflineDiarizationError.processingFailed(
+                    "FBANK batch produced \(outputBatch.count) outputs for \(audioArrays.count) inputs"
+                )
+            }
+
+            var results: [MLMultiArray] = []
+            results.reserveCapacity(outputBatch.count)
+            for index in 0..<outputBatch.count {
+                guard
+                    let featureArray = outputBatch.features(at: index)
+                        .featureValue(for: fbankOutputName)?.multiArrayValue
+                else {
+                    throw OfflineDiarizationError.processingFailed(
+                        "FBANK model missing \(fbankOutputName) output at batch index \(index)"
+                    )
+                }
+                recenterOnSignal(featureArray, audio: audioArrays[index])
+                results.append(featureArray)
+            }
+
+            return results
+        }
     }
 
     /// Applies `SilenceAwareFbank` to one `[1, 1, bands, frames]` FBANK output in place.
@@ -945,25 +947,27 @@ struct OfflineEmbeddingExtractor {
         fbankFeatures: MLMultiArray,
         weightsArray: MLMultiArray
     ) throws -> [Float] {
-        let provider = ZeroCopyDiarizerFeatureProvider(
-            features: [
-                fbankFeatureName: MLFeatureValue(multiArray: fbankFeatures),
-                weightInputName: MLFeatureValue(multiArray: weightsArray),
-            ]
-        )
-        let options = MLPredictionOptions()
-        if #available(macOS 14.0, iOS 17.0, *) {
-            fbankFeatures.prefetchToNeuralEngine()
-            weightsArray.prefetchToNeuralEngine()
-        }
+        try autoreleasepool {
+            let provider = ZeroCopyDiarizerFeatureProvider(
+                features: [
+                    fbankFeatureName: MLFeatureValue(multiArray: fbankFeatures),
+                    weightInputName: MLFeatureValue(multiArray: weightsArray),
+                ]
+            )
+            let options = MLPredictionOptions()
+            if #available(macOS 14.0, iOS 17.0, *) {
+                fbankFeatures.prefetchToNeuralEngine()
+                weightsArray.prefetchToNeuralEngine()
+            }
 
-        let output = try embeddingModel.prediction(from: provider, options: options)
-        guard let embeddingArray = output.featureValue(for: embeddingOutputName)?.multiArrayValue else {
-            throw OfflineDiarizationError.processingFailed("Embedding model missing \(embeddingOutputName) output")
-        }
+            let output = try embeddingModel.prediction(from: provider, options: options)
+            guard let embeddingArray = output.featureValue(for: embeddingOutputName)?.multiArrayValue else {
+                throw OfflineDiarizationError.processingFailed("Embedding model missing \(embeddingOutputName) output")
+            }
 
-        let pointer = embeddingArray.dataPointer.assumingMemoryBound(to: Float.self)
-        return Array(UnsafeBufferPointer(start: pointer, count: embeddingArray.count))
+            let pointer = embeddingArray.dataPointer.assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: pointer, count: embeddingArray.count))
+        }
     }
 
     private static func milliseconds(from duration: Duration) -> Double {
