@@ -30,6 +30,15 @@ public struct Nemotron3StateUpdater {
     ///   - lc: Encoded left-context frames of this chunk.
     ///   - rc: Encoded right-context frames of this chunk.
     /// - Returns: This chunk's core-frame probabilities at 10 ms resolution.
+    /// Core encoded frame count for one chunk (excluding both left and right context).
+    /// Shared by `Nemotron3Diarizer`'s VAD-skip zero-fill path so skipped and inferred
+    /// chunks always emit identical frame counts.
+    static func coreEncFrames(
+        chunkEncLength: Int, lc: Int, rc: Int, config: Nemotron3Config
+    ) -> Int {
+        min(max(chunkEncLength - lc - rc, 0), config.chunkLen)
+    }
+
     public func update(
         state: inout Nemotron3StreamingState,
         chunkEmbeddings: [Float],
@@ -42,13 +51,17 @@ public struct Nemotron3StateUpdater {
         let d = config.preEncoderDims
         let s = config.numSpeakers
         let up = config.upsampleFactor
-        let maxChunk = config.chunkEncFrames - lc - rc
         let fifoCap = config.fifoLen
         let scCap = config.spkcacheLen
 
         let scLen = state.spkcacheLength
         let fifoLen = state.fifoLength
-        let chunkLen = min(max(chunkEncLength - lc, 0), maxChunk)
+        // Exclude both left and right context from valid encoded length so a short
+        // right-context tail (0 < rem <= 3.12 s for offline) never spills right context
+        // into the penultimate chunk's core output or FIFO (causing backward jumps up to
+        // 1.52 s and up to 1.04 s duplicated/dropped for 1.61 s <= rem <= 3.12 s).
+        let chunkLen = Self.coreEncFrames(
+            chunkEncLength: chunkEncLength, lc: lc, rc: rc, config: config)
 
         // Region slices of the packed predictions (valid frames are left-packed).
         let spkcachePredsCur = Array(predictions[0..<(scLen * s)])

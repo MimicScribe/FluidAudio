@@ -102,11 +102,11 @@ public final class Nemotron3Diarizer {
                 let hi = min(coreEnd, speechMask.count)
                 let hasSpeech = lo < hi && speechMask[lo..<hi].contains(true)
                 if !hasSpeech {
-                    let lcEnc = (chunk.leftOffset + sub / 2) / sub
-                    let rcEnc = (chunk.rightOffset + sub - 1) / sub
-                    let encLen = (chunk.length + sub - 1) / sub
-                    let chunkFrames = min(
-                        max(encLen - lcEnc, 0), config.chunkEncFrames - lcEnc - rcEnc)
+                    let chunkFrames = Self.coreEncFrames(
+                        chunkLength: chunk.length,
+                        leftOffset: chunk.leftOffset,
+                        rightOffset: chunk.rightOffset,
+                        config: config)
                     total.append(
                         contentsOf: repeatElement(
                             0, count: chunkFrames * config.upsampleFactor * config.numSpeakers))
@@ -240,6 +240,20 @@ public final class Nemotron3Diarizer {
         )
     }
 
+    /// Number of core encoded frames emitted for one chunk (excluding both left and right
+    /// context). Delegates to `Nemotron3StateUpdater.coreEncFrames` so the VAD-skip path
+    /// and inference state updater share one formula.
+    static func coreEncFrames(
+        chunkLength: Int, leftOffset: Int, rightOffset: Int, config: Nemotron3Config
+    ) -> Int {
+        let sub = config.subsamplingFactor
+        let lcEnc = (leftOffset + sub / 2) / sub
+        let rcEnc = (rightOffset + sub - 1) / sub
+        let encLen = (chunkLength + sub - 1) / sub
+        return Nemotron3StateUpdater.coreEncFrames(
+            chunkEncLength: encLen, lc: lcEnc, rc: rcEnc, config: config)
+    }
+
     /// Convert frame probabilities into arrival-ordered speaker segments.
     public static func segments(
         probabilities: [Float], frameCount: Int, numSpeakers: Int = 8,
@@ -302,7 +316,8 @@ public struct Nemotron3FeatureLoader {
         guard startFeat < featLength else { return nil }
         let leftOffset = min(lcMel, startFeat)
         let endFeat = min(startFeat + coreMel, featLength)
-        let rightOffset = min(rcMel, featLength - endFeat)
+        let validLimit = min(featLength, featSeqLength)
+        let rightOffset = max(0, min(rcMel, validLimit - endFeat))
 
         let startIdx = (startFeat - leftOffset) * melFeatures
         let endIdx = (endFeat + rightOffset) * melFeatures
